@@ -1,0 +1,7 @@
+# Calendario de eventos de alto impacto. Lo mantienes tú: una línea por evento.
+# Formato:  fecha y hora en UTC (ISO 8601), nombre, impacto (high | medium | low)
+# Mientras falten BLACKOUT_MIN minutos (o hayan pasado menos de esos) para un
+# evento "high", el agente macro veta nuevas entradas.
+#
+# Ejemplo (quita el # para activarlo):
+# 2026-12-16T19:00:00Z, Decisión de tipos FOMC, high
