@@ -9,11 +9,13 @@ import json
 import logging
 import time
 import urllib.parse
-import urllib.request
 import xml.etree.ElementTree as ET
 
+import requests
+
 import config
-from utils import cache
+from utils import cache_manager as cache
+from utils import db
 
 log = logging.getLogger("news")
 _av_lock = asyncio.Lock()
@@ -21,9 +23,9 @@ _av_last = 0.0
 
 
 def _get(url: str) -> bytes:
-    req = urllib.request.Request(url, headers={"User-Agent": "trading-system/1.0"})
-    with urllib.request.urlopen(req, timeout=15) as r:
-        return r.read(2_000_000)  # tope de 2 MB: la respuesta viene de terceros
+    with requests.get(url, headers={"User-Agent": "trading-system/1.0"}, timeout=15, stream=True) as r:
+        r.raise_for_status()
+        return r.raw.read(2_000_000, decode_content=True)  # tope de 2 MB: la respuesta viene de terceros
 
 
 async def _av_news(symbol: str) -> list[dict]:
@@ -39,7 +41,7 @@ async def _av_news(symbol: str) -> list[dict]:
     # Repartir el presupuesto diario entre los activos a lo largo de 24 h.
     ttl = max(config.MACRO_INTERVAL, 86400 * len(config.SYMBOLS) / config.AV_DAILY_BUDGET)
     day = f"av_calls:{dt.datetime.now(dt.timezone.utc).date()}"
-    used = cache.get_state(day, 0)
+    used = db.get_state(day, 0)
     if used >= config.AV_DAILY_BUDGET:
         return []
     url = "https://www.alphavantage.co/query?" + urllib.parse.urlencode({
@@ -49,7 +51,7 @@ async def _av_news(symbol: str) -> list[dict]:
         await asyncio.sleep(max(0.0, 1.5 - (time.monotonic() - _av_last)))
         raw = await asyncio.to_thread(_get, url)
         _av_last = time.monotonic()
-    cache.set_state(day, used + 1)
+    db.set_state(day, used + 1)
     data = json.loads(raw)
     items = []
     for a in data.get("feed", [])[:15]:
@@ -81,7 +83,7 @@ async def _rss_news() -> list[dict]:
         try:
             root = ET.fromstring(await asyncio.to_thread(_get, url))
         except Exception as e:
-            log.warning("RSS %s falló: %s", url, e)
+            log.warning("RSS %s falló: %s", urllib.parse.urlparse(url).netloc, type(e).__name__)
             continue
         host = urllib.parse.urlparse(url).netloc
         for it in list(root.iter("item"))[:12]:
@@ -99,7 +101,7 @@ async def headlines() -> list[dict]:
     for symbol in config.SYMBOLS:
         try:
             out += await _av_news(symbol)
-        except Exception as e:
-            log.warning("Alpha Vantage falló para %s: %s", symbol, e)
+        except Exception as e:  # solo el tipo: el mensaje de requests lleva la URL con la clave
+            log.warning("Alpha Vantage falló para %s: %s", symbol, type(e).__name__)
     out += await _rss_news()
     return [x for x in out if not (x["title"] in seen or seen.add(x["title"]))][:30]

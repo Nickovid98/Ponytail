@@ -1,7 +1,7 @@
-"""Agente 3 · SMC Intradía: estructura (BOS/CHoCH), order blocks y liquidez."""
+"""Agente 3 · SMC Intradía: estructura (BOS/CHoCH), order blocks, FVG y liquidez."""
 import config
 from agents import Signal, neutral
-from utils.risk import atr
+from utils.risk_manager import atr
 
 
 class SMCAgent:
@@ -16,10 +16,9 @@ class SMCAgent:
 
     @classmethod
     def analyze(cls, symbol, df) -> Signal:
-        # ponytail: reglas mecánicas sobre fractales de k velas. Techo: no hay
-        # confluencia multi-timeframe ni FVG, y un order block es simplemente
-        # "la última vela contraria antes de la ruptura". Para afinarlo, añadir
-        # sesgo de 15m/1h y exigir desplazamiento (vela de rango > 1,5 ATR).
+        # ponytail: reglas mecánicas sobre fractales de k velas. Techo: un solo
+        # timeframe, y un order block es simplemente "la última vela contraria
+        # antes de la ruptura". Para afinarlo, añadir el sesgo de 15m/1h.
         n, k = len(df), cls.k
         if n < 60:
             return neutral(cls.name, symbol, "histórico insuficiente")
@@ -55,6 +54,15 @@ class SMCAgent:
             return neutral(cls.name, symbol, f"{kind} invalidado: precio al otro lado del order block")
         retest = ob_lo - 0.25 * atr_v <= price <= ob_hi + 0.25 * atr_v
 
+        # Fair Value Gap: hueco entre la vela j-2 y la j dejado por el impulso de
+        # la ruptura. Solo cuenta si el precio aún no lo ha rellenado.
+        fvg = None
+        for j in range(n - 1, max(ob if ob is not None else i0 - 10, 2) - 1, -1):
+            lo_g, hi_g = (h[j - 2], l[j]) if d > 0 else (h[j], l[j - 2])
+            if hi_g > lo_g and ((l[j:].min() > lo_g) if d > 0 else (h[j:].max() < hi_g)):
+                fvg = (lo_g, hi_g)
+                break
+
         # Barrido de liquidez antes de la ruptura: mecha que perfora un swing y cierra de vuelta.
         sw = lows if d > 0 else highs
 
@@ -72,13 +80,16 @@ class SMCAgent:
         above = [p for p in pools(highs, h) + [h[i] for i in highs[-6:]] if p > price]
         below = [p for p in pools(lows, l) + [l[i] for i in lows[-6:]] if p < price]
 
-        conf = (58 if kind == "CHoCH" else 50) + 15 * sweep + 15 * retest - min(35, age * 0.7)
+        conf = (58 if kind == "CHoCH" else 50) + 15 * sweep + 15 * retest + 10 * (fvg is not None) - min(35, age * 0.7)
         conf = int(max(0, min(100, conf)))
         tf = cls.timeframe
         why = (f"{kind} {'alcista' if d > 0 else 'bajista'} hace {age} velas {tf}; "
-               f"OB {ob_lo:.6g}-{ob_hi:.6g}{' en retest' if retest else ''}{'; barrido previo' if sweep else ''}")
+               f"OB {ob_lo:.6g}-{ob_hi:.6g}{' en retest' if retest else ''}"
+               + (f"; FVG {fvg[0]:.6g}-{fvg[1]:.6g}" if fvg else "") + ("; barrido previo" if sweep else ""))
         return Signal(
             agent=cls.name, symbol=symbol, confidence=conf, rationale=why,
             direction="NEUTRAL" if conf < 25 else "LONG" if d > 0 else "SHORT",
             support=float(ob_lo if d > 0 else max(below)) if d > 0 or below else None,
-            resistance=float(ob_hi if d < 0 else min(above)) if d < 0 or above else None)
+            resistance=float(ob_hi if d < 0 else min(above)) if d < 0 or above else None,
+            features={"age": float(age), "choch": float(kind == "CHoCH"), "retest": float(retest),
+                      "sweep": float(sweep), "fvg": float(fvg is not None)})

@@ -1,12 +1,10 @@
-"""Caché con caducidad y estado compartido (motor <-> dashboard), sobre SQLite.
+"""SQLite (trades_history.db): conexión compartida y estado motor <-> dashboard.
 
-Un solo archivo de base de datos en modo WAL: el motor escribe y el dashboard
-lee a la vez sin bloquearse.
+Modo WAL: el motor escribe y el dashboard lee a la vez sin bloquearse.
 """
 import json
 import sqlite3
 import threading
-import time
 
 import config
 
@@ -23,20 +21,8 @@ def q(sql: str, params: tuple = ()) -> list[tuple]:
             _conn = sqlite3.connect(config.DB_PATH, timeout=10, check_same_thread=False,
                                     isolation_level=None)
             _conn.execute("PRAGMA journal_mode=WAL")
-            _conn.execute("CREATE TABLE IF NOT EXISTS cache(key TEXT PRIMARY KEY, value TEXT, expires REAL)")
             _conn.execute("CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY, value TEXT)")
         return _conn.execute(sql, params).fetchall()
-
-
-def cache_get(key: str):
-    rows = q("SELECT value FROM cache WHERE key=? AND expires>?", (key, time.time()))
-    return json.loads(rows[0][0]) if rows else None
-
-
-def cache_set(key: str, value, ttl: float) -> None:
-    now = time.time()
-    q("INSERT OR REPLACE INTO cache VALUES(?,?,?)", (key, json.dumps(value), now + ttl))
-    q("DELETE FROM cache WHERE expires<?", (now,))
 
 
 def get_state(key: str, default=None):

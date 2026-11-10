@@ -28,6 +28,8 @@ class Signal(BaseModel):
     rationale: str
     veto: bool = False  # True = pedir al jefe que no abra operaciones nuevas
     ts: float = Field(default_factory=time.time)
+    version: str = ""  # generación que emitió la señal, p. ej. "SMC_Scalper_v3"
+    features: dict[str, float] = Field(default_factory=dict)  # medidas sobre las que actúan las reglas mutadas
 
     @field_validator("rationale", mode="before")
     @classmethod

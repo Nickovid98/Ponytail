@@ -11,7 +11,7 @@ import statistics
 import sys
 import time
 
-from utils import cache, trade_logger
+from utils import db, trade_logger
 
 MIN_SAMPLES = 5  # con menos votos de un agente en un activo no se toca su peso
 PRIOR = 10  # votos "fantasma" al 50 % que frenan el ajuste con pocas muestras
@@ -66,7 +66,7 @@ def new_weights(stats: dict, old: dict) -> dict:
 
 def run(days: float = 30, dry_run: bool = False) -> dict:
     trades = trade_logger.closed_trades(time.time() - days * 86400)
-    old = cache.get_state("weights", {})
+    old = db.get_state("weights", {})
     stats = agent_stats(trades)
     weights = new_weights(stats, old)
     report = {
@@ -76,9 +76,9 @@ def run(days: float = 30, dry_run: bool = False) -> dict:
                        for s, (n, ok) in by.items()} for a, by in stats.items()},
     }
     if not dry_run:
-        cache.set_state("weights", weights)
-        cache.set_state("optimizer:report", report)
-        cache.set_state("optimizer:last_run", report["ts"])
+        db.set_state("weights", weights)
+        db.set_state("optimizer:report", report)
+        db.set_state("optimizer:last_run", report["ts"])
     return report
 
 

@@ -9,7 +9,9 @@ import ccxt.async_support as ccxt
 import pandas as pd
 
 import config
-from utils import cache, trade_logger
+from utils import cache_manager as cache
+from utils import risk_manager as rm
+from utils import trade_logger
 
 log = logging.getLogger("exchange")
 
@@ -20,7 +22,7 @@ class Market:
     def __init__(self):
         opts = {"enableRateLimit": True}
         if config.EXECUTION_MODE != "paper":
-            opts |= {"apiKey": config.EXCHANGE_API_KEY, "secret": config.EXCHANGE_API_SECRET}
+            opts |= {"apiKey": config.EXCHANGE_API_KEY, "secret": config.EXCHANGE_SECRET}
             if config.EXCHANGE_PASSWORD:
                 opts["password"] = config.EXCHANGE_PASSWORD
         self.ex = getattr(ccxt, config.EXCHANGE_ID)(opts)
@@ -42,9 +44,9 @@ class Market:
         if rows is None:
             rows = await self.ex.fetch_ohlcv(symbol, tf, limit=limit)
             # ponytail: al caducar se vuelve a pedir la ventana entera. Techo:
-            # ~1 petición por (símbolo, timeframe) cada cuarto de vela. Si el
-            # rate limit aprieta, pasar a descarga incremental con `since`.
-            cache.cache_set(key, rows, max(15, min(self.ex.parse_timeframe(tf) / 4, 900)))
+            # 1 petición por (símbolo, timeframe) cada 1-3 minutos. Si el rate
+            # limit aprieta, pasar a descarga incremental con `since`.
+            cache.cache_set(key, rows, cache.window(self.ex.parse_timeframe(tf) / 4))
         df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
         df["ts"] = pd.to_datetime(df.ts, unit="ms", utc=True)
         return df
@@ -73,12 +75,9 @@ class Market:
         await self.ex.close()
 
 
-def _fee(price: float, qty: float) -> float:
-    return price * qty * config.FEE_PCT / 100
-
-
 class PaperBroker:
-    """Simula las órdenes contra precios reales. No envía nada al exchange."""
+    """Simula las órdenes contra precios reales, con comisión y deslizamiento.
+    No envía nada al exchange."""
 
     def __init__(self, market):
         self.market = market
@@ -86,13 +85,18 @@ class PaperBroker:
     async def equity(self) -> float:
         return config.CAPITAL + trade_logger.realized_pnl()
 
+    @staticmethod
+    def _fill(ref: float, qty: float, buying: bool, market_order: bool = True, **extra) -> dict:
+        price = rm.slip(ref, buying) if market_order else ref
+        return {"price": price, "qty": qty, "fee": rm.fee(price, qty), "slippage": abs(price - ref) * qty, **extra}
+
     async def open(self, symbol, side, qty, sl, tp, ref_price) -> dict:
-        return {"price": ref_price, "qty": qty, "fee": _fee(ref_price, qty), "meta": {}}
+        return self._fill(ref_price, qty, buying=side == "LONG", meta={})
 
     async def check_exit(self, t: dict) -> dict | None:
-        # ponytail: SL/TP se evalúan con velas de 1m en cada ciclo del jefe.
-        # Techo: resolución de 1 minuto y salida al precio exacto del nivel
-        # (ignora huecos y deslizamiento, así que el paper es algo optimista).
+        # ponytail: SL/TP se evalúan con velas de 1m (cacheadas 60 s) más el
+        # último precio en cada ciclo del jefe. Techo: resolución de 1 minuto y
+        # no modela huecos de precio más allá del deslizamiento fijo.
         # Mejora: stream de ticks por websocket.
         df = await self.market.ohlcv(t["symbol"], "1m", 10)
         since = df[df.ts >= pd.Timestamp(t["opened_ts"], unit="s", tz="UTC")]
@@ -102,21 +106,22 @@ class PaperBroker:
         long = t["side"] == "LONG"
         # Si una misma vela toca ambos niveles se asume el stop: lo conservador.
         if (lo <= t["sl"]) if long else (hi >= t["sl"]):
-            return {"price": t["sl"], "reason": "SL", "fee": _fee(t["sl"], t["qty"])}
+            return self._fill(t["sl"], t["qty"], buying=not long, reason="SL")  # el stop es orden a mercado
         if (hi >= t["tp"]) if long else (lo <= t["tp"]):
-            return {"price": t["tp"], "reason": "TP", "fee": _fee(t["tp"], t["qty"])}
+            return self._fill(t["tp"], t["qty"], buying=not long, market_order=False, reason="TP")  # límite
         return None
 
     async def close(self, t: dict) -> dict:
-        p = await self.market.price(t["symbol"])
-        return {"price": p, "fee": _fee(p, t["qty"])}
+        return self._fill(await self.market.price(t["symbol"]), t["qty"], buying=t["side"] != "LONG")
 
 
 class CcxtBroker:
     """Órdenes reales (sandbox o live). Asume futuros lineales en modo one-way.
 
     El stop y el take profit quedan como órdenes en el exchange: protegen la
-    posición aunque este programa se caiga.
+    posición aunque este programa se caiga. El deslizamiento aquí es el real de
+    la entrada (precio ejecutado frente al de referencia); la comisión se estima
+    con FEE_PCT, y el saldo del exchange es siempre la cifra que manda.
     """
 
     def __init__(self, market):
@@ -159,7 +164,8 @@ class CcxtBroker:
             except Exception:
                 price = None
         price = float(price or ref_price)
-        return {"price": price, "qty": amount * cs, "fee": _fee(price, amount * cs), "meta": ids}
+        return {"price": price, "qty": amount * cs, "fee": rm.fee(price, amount * cs),
+                "slippage": abs(price - ref_price) * amount * cs, "meta": ids}
 
     async def _cancel(self, symbol: str, ids: dict) -> None:
         for oid in ids.values():
@@ -189,7 +195,7 @@ class CcxtBroker:
             last = await self.market.price(symbol)
             near_sl = abs(last - t["sl"]) < abs(last - t["tp"])
             hit = (t["sl"] if near_sl else t["tp"], "SL?" if near_sl else "TP?")
-        return {"price": hit[0], "reason": hit[1], "fee": _fee(hit[0], t["qty"])}
+        return {"price": hit[0], "reason": hit[1], "fee": rm.fee(hit[0], t["qty"]), "slippage": 0.0}
 
     async def close(self, t: dict) -> dict:
         ex, symbol = self.ex, t["symbol"]
@@ -199,4 +205,4 @@ class CcxtBroker:
         o = await ex.create_order(symbol, "market", side, float(ex.amount_to_precision(symbol, t["qty"] / cs)),
                                   None, {"reduceOnly": True})
         p = float(o.get("average") or o.get("price") or await self.market.price(symbol))
-        return {"price": p, "fee": _fee(p, t["qty"])}
+        return {"price": p, "fee": rm.fee(p, t["qty"]), "slippage": 0.0}

@@ -46,4 +46,5 @@ class HistorianAgent:
         return make(
             cls.name, symbol, float(np.clip(score, -1, 1)),
             f"Regresión {n}h {slope * 2400:+.2f}%/día, R²={r2:.2f}, z={z:+.1f}σ, estacionalidad {hour:02d}h t={t:+.1f}",
-            support=float(np.exp(fit[-1] - 2 * sd)), resistance=float(np.exp(fit[-1] + 2 * sd)))
+            support=float(np.exp(fit[-1] - 2 * sd)), resistance=float(np.exp(fit[-1] + 2 * sd)),
+            features={"r2": float(r2), "z": float(z), "t": float(t)})

@@ -87,5 +87,6 @@ class WyckoffAgent:
             direction="NEUTRAL" if conf < 20 else "LONG" if score > 0 else "SHORT",
             support=max((x for x in levels if x < price), default=None),
             resistance=min((x for x in levels if x > price), default=None),
+            features={"er": float(er), "imb": imb, "spring": float(spring), "upthrust": float(upthrust)},
             rationale=(f"{phase.capitalize()}; POC {vp['poc']:.6g}, VA {vp['val']:.6g}-{vp['vah']:.6g}; "
                        f"vol↑-↓ {imb:+.2f}; ER {er:.2f}{'; spring' if spring else ''}{'; upthrust' if upthrust else ''}"))

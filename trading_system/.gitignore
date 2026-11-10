@@ -1,4 +1,8 @@
 .env
-data/
-__pycache__/
+venv/
 .venv/
+data/
+*.db
+*.db-shm
+*.db-wal
+__pycache__/

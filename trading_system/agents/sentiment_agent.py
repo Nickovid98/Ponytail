@@ -56,4 +56,5 @@ class SentimentAgent:
             cls.name, symbol, float(score),
             f"4H {s4:+.2f} (RSI {r4:.0f}) · 1D {s1:+.2f} (RSI {r1:.0f}) · libro "
             + (f"{book:+.2f}" if book is not None else "n/d"),
-            support=float(d4.low.iloc[-20:].min()), resistance=float(d4.high.iloc[-20:].max()))
+            support=float(d4.low.iloc[-20:].min()), resistance=float(d4.high.iloc[-20:].max()),
+            features={"s4": float(s4), "s1": float(s1), "rsi4": r4, "rsi1": r1, "book": float(book or 0)})

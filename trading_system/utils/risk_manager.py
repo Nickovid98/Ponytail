@@ -1,9 +1,15 @@
-"""Cálculos de riesgo. Funciones puras: sin red, sin estado, sin LLM."""
+"""Riesgo y costes de ejecución. Funciones puras: sin red, sin estado, sin LLM.
+
+Las comisiones y el deslizamiento se descuentan del PnL antes de que nadie lo
+evalúe: ni el optimizador ni el gestor de evolución ven nunca un PnL bruto.
+"""
 import math
 
 import pandas as pd
 
 import config
+
+PAPER_TRADING = config.PAPER_TRADING
 
 
 def atr(df: pd.DataFrame, n: int = 14) -> float:
@@ -11,6 +17,24 @@ def atr(df: pd.DataFrame, n: int = 14) -> float:
     prev = df.close.shift()
     tr = pd.concat([df.high - df.low, (df.high - prev).abs(), (df.low - prev).abs()], axis=1).max(axis=1)
     return float(tr.ewm(alpha=1 / n, adjust=False).mean().iloc[-1])
+
+
+def fee(price: float, qty: float) -> float:
+    """Comisión de una ejecución (un lado)."""
+    return price * qty * config.FEE_PCT / 100
+
+
+def slip(price: float, buying: bool) -> float:
+    """Precio de ejecución proyectado de una orden a mercado: siempre en contra."""
+    # ponytail: deslizamiento fijo en % del precio. Techo: no depende del tamaño
+    # de la orden ni de la liquidez del momento. Mejora: recorrer el libro de
+    # órdenes (fetch_order_book) con la cantidad real.
+    return price * (1 + (1 if buying else -1) * config.SLIPPAGE_PCT / 100)
+
+
+def round_trip_cost_pct() -> float:
+    """Coste proyectado de entrar y salir por el stop, en % del nocional."""
+    return 2 * (config.FEE_PCT + config.SLIPPAGE_PCT)
 
 
 def stop_distance(side: str, entry: float, atr_v: float, structure: float | None = None) -> float:
@@ -34,8 +58,9 @@ def build_plan(side: str, entry: float, atr_v: float, equity: float,
             isinstance(x, (int, float)) and math.isfinite(x) and x > 0 for x in (entry, atr_v, equity)):
         return None
     dist = stop_distance(side, entry, atr_v, structure)
-    risk_usd = equity * config.RISK_PER_TRADE_PCT / 100
-    qty = risk_usd / dist  # si salta el stop se pierde risk_usd
+    cost = entry * round_trip_cost_pct() / 100  # comisiones + deslizamiento por unidad
+    # El coste cuenta como riesgo: si salta el stop, la pérdida NETA es el 1 %.
+    qty = equity * config.RISK_PER_TRADE_PCT / 100 / (dist + cost)
     qty = min(qty, equity * config.MAX_LEVERAGE / entry)  # tope de apalancamiento
     if qty * entry < config.MIN_NOTIONAL:
         return None
@@ -43,7 +68,8 @@ def build_plan(side: str, entry: float, atr_v: float, equity: float,
     return {
         "side": side, "entry": entry, "qty": qty,
         "sl": entry - sign * dist, "tp": entry + sign * dist * config.REWARD_RISK,
-        "risk_usd": qty * dist, "notional": qty * entry, "leverage": qty * entry / equity,
+        "risk_usd": qty * (dist + cost), "cost_est": qty * cost,
+        "notional": qty * entry, "leverage": qty * entry / equity,
     }
 
 
