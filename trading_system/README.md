@@ -247,5 +247,5 @@ utils/
   exchange.py            datos de mercado (CCXT), PaperBroker y CcxtBroker
   alpha_vantage.py       noticias: Alpha Vantage + RSS
   db.py                  conexión SQLite y estado compartido
-.claude/skills/          The Day Trader skill (terceros, acciones de EE. UU.)
+.claude/skills/          37 skills de terceros para Claude Code (ver su README)
 ```
