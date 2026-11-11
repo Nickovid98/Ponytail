@@ -19,6 +19,7 @@ Sistema de day trading multi-agente para cripto (CCXT) y futuros de Topstep (`BR
 - Todo PnL que se evalúe es neto de comisiones y deslizamiento.
 - Cada cambio de lógica lleva su comprobación en `selfcheck.py`. Las simplificaciones se marcan con `ponytail:` y dicen su techo.
 - No ejecutar código de repositorios externos sin revisarlo antes.
+- Alpaca (`EXCHANGE_ID=alpaca`): solo datos y simulación; el motor no le envía órdenes.
 - TopstepX: el motor solo corre en el ordenador del usuario. Nunca conectar a `api.topstepx.com` desde la nube
   ni desplegar en un VPS; aquí se prueba contra la API falsa de `selfcheck.py`. El kill switch (75 % del límite
   diario, techo 80 %) y la verificación del stop tras cada orden no se relajan.

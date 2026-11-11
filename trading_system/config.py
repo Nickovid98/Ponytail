@@ -124,6 +124,10 @@ if BROKER == "topstepx":
     FEE_PCT = SLIPPAGE_PCT = MIN_NOTIONAL = 0.0
     MAX_LEVERAGE = 1e9
 
+if EXCHANGE_ID == "alpaca" and BROKER == "ccxt" and not PAPER_TRADING:
+    raise SystemExit("Con Alpaca el motor solo simula (PAPER_TRADING=True): lee sus precios reales pero no envía\n"
+                     "órdenes. Alpaca cripto es contado, sin cortos ni stops reduce-only, y esa ejecución no existe.")
+
 if EXECUTION_MODE == "live" and _s("CONFIRM_LIVE") != "SI_ARRIESGO_DINERO_REAL":
     raise SystemExit(
         "Esta configuración envía órdenes reales (dinero real o una cuenta de evaluación). Para confirmarlo,\n"

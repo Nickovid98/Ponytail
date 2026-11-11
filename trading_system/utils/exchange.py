@@ -16,17 +16,35 @@ from utils import trade_logger
 log = logging.getLogger("exchange")
 
 
+def make_exchange():
+    """Cliente CCXT configurado. En modo paper no usa claves, salvo en Alpaca: allí
+    solo sirven para leer datos sin el límite de peticiones de los accesos anónimos."""
+    opts = {"enableRateLimit": True}
+    alpaca_keys = config.EXCHANGE_ID == "alpaca" and bool(config.EXCHANGE_API_KEY)
+    if config.EXECUTION_MODE != "paper" or alpaca_keys:
+        opts |= {"apiKey": config.EXCHANGE_API_KEY, "secret": config.EXCHANGE_SECRET}
+        if config.EXCHANGE_PASSWORD:
+            opts["password"] = config.EXCHANGE_PASSWORD
+    ex = getattr(ccxt, config.EXCHANGE_ID)(opts)
+    if config.EXCHANGE_ID == "alpaca":
+        if alpaca_keys and config.EXCHANGE_SANDBOX:
+            ex.set_sandbox_mode(True)  # las claves de una cuenta paper solo valen en paper-api
+        elif not alpaca_keys:
+            # La lista de mercados de Alpaca exige clave; las velas de cripto no. Sin clave se
+            # declaran a mano los pares configurados.
+            ex.set_markets([{"id": s, "symbol": s, "base": s.split("/")[0], "quote": s.split("/")[1],
+                             "baseId": s.split("/")[0], "quoteId": s.split("/")[1], "type": "spot", "spot": True,
+                             "active": True, "precision": {"price": 0.01, "amount": 1e-9},
+                             "limits": {"amount": {}, "price": {}, "cost": {}}} for s in config.SYMBOLS])
+    return ex
+
+
 class Market:
-    """Datos de mercado cacheados. En modo paper no usa claves."""
+    """Datos de mercado cacheados."""
 
     def __init__(self):
-        opts = {"enableRateLimit": True}
-        if config.EXECUTION_MODE != "paper":
-            opts |= {"apiKey": config.EXCHANGE_API_KEY, "secret": config.EXCHANGE_SECRET}
-            if config.EXCHANGE_PASSWORD:
-                opts["password"] = config.EXCHANGE_PASSWORD
-        self.ex = getattr(ccxt, config.EXCHANGE_ID)(opts)
-        if config.EXECUTION_MODE == "sandbox":
+        self.ex = make_exchange()
+        if config.EXECUTION_MODE == "sandbox" and config.EXCHANGE_ID != "alpaca":
             kind = config.SANDBOX_KIND
             if kind == "auto":
                 # Binance retiró el testnet clásico de futuros: ccxt acepta
@@ -48,7 +66,21 @@ class Market:
         key = f"ohlcv:{config.EXCHANGE_ID}:{config.EXECUTION_MODE}:{symbol}:{tf}:{limit}"
         rows = cache.cache_get(key)
         if rows is None:
-            rows = await self.ex.fetch_ohlcv(symbol, tf, limit=limit)
+            if config.EXCHANGE_ID == "alpaca":
+                # Sin fecha de inicio, Alpaca solo devuelve las velas de hoy, y con ella entrega
+                # páginas de unos 7 días empezando por lo más antiguo. Se recorre hasta el presente
+                # una ventana holgada (un intervalo sin operaciones no tiene vela) y se recorta.
+                wide, span, now = int(limit * 1.5), self.ex.parse_timeframe(tf) * 1000, self.ex.milliseconds()
+                since, rows = now - wide * span, []
+                while since < now:
+                    batch = await self.ex.fetch_ohlcv(symbol, tf, since=since, limit=wide)
+                    if not batch or batch[-1][0] < since:
+                        break
+                    rows += batch
+                    since = batch[-1][0] + span
+                rows = rows[-limit:]
+            else:
+                rows = await self.ex.fetch_ohlcv(symbol, tf, limit=limit)
             # ponytail: al caducar se vuelve a pedir la ventana entera. Techo:
             # 1 petición por (símbolo, timeframe) cada 1-3 minutos. Si el rate
             # limit aprieta, pasar a descarga incremental con `since`.

@@ -187,6 +187,27 @@ cuentan en el denominador, así que hace falta acuerdo amplio. Opera si
 Los pesos de cada agente salen de su historial de aciertos (`optimizer.py`, una
 vez por semana, o `python optimizer.py --dry-run`).
 
+## Alpaca: precios reales, órdenes simuladas
+
+Con `EXCHANGE_ID=alpaca` el motor y el backtest leen las velas de cripto de
+Alpaca. Solo simula: `PAPER_TRADING=False` se rechaza al arrancar, porque Alpaca
+cripto es contado (sin cortos ni stops reduce-only) y esa ejecución no existe.
+
+```env
+EXCHANGE_ID=alpaca
+SYMBOLS=BTC/USD,ETH/USD
+QUOTE=USD
+FEE_PCT=0.25                 # comisión real de Alpaca cripto por lado
+EXCHANGE_API_KEY=            # opcional: clave de tu cuenta paper
+EXCHANGE_SECRET=
+```
+
+Sin clave funciona, pero Alpaca limita mucho los accesos anónimos (unas pocas
+peticiones por minuto): alcanza para `backtest.py`, no para el motor en
+continuo. Con la clave de una cuenta paper el límite deja de ser un problema;
+la clave solo se usa para leer datos. Los cortos que abra la simulación no se
+podrían replicar en una cuenta de Alpaca.
+
 ## Topstep: futuros con TopstepX (`utils/topstepx.py`)
 
 Con `BROKER=topstepx` el mismo motor opera futuros de una cuenta de Topstep a

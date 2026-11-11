@@ -209,7 +209,7 @@ def report(res: dict, days: float, evolution: bool) -> str:
 
 
 async def main() -> None:
-    import ccxt.async_support as ccxt
+    from utils.exchange import make_exchange
     ap = argparse.ArgumentParser(description="Simula el motor sobre velas históricas.")
     ap.add_argument("--days", type=float, default=30)
     ap.add_argument("--evolution", action="store_true", help="activa la selección natural (mutación fija)")
@@ -220,7 +220,7 @@ async def main() -> None:
     for name, value in (("DECISION_THRESHOLD", a.threshold), ("REWARD_RISK", a.rr), ("ATR_SL_MULT", a.sl_mult)):
         if value is not None:
             setattr(config, name, value)
-    ex = getattr(ccxt, config.EXCHANGE_ID)({"enableRateLimit": True})
+    ex = make_exchange()
     try:
         data = {s: await download(ex, s, int(a.days), config.ROOT / "data" / "backtest") for s in config.SYMBOLS}
     finally:

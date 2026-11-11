@@ -45,7 +45,7 @@ from agents.smc_agent import SMCAgent
 from agents.wyckoff_agent import WyckoffAgent
 from utils import alpha_vantage, cache_manager, db, notifier, token_budget, trade_logger
 from utils import risk_manager as risk
-from utils.exchange import CcxtBroker, PaperBroker
+from utils.exchange import CcxtBroker, Market, PaperBroker, make_exchange
 from utils.topstepx import (TopstepBroker, TopstepClient, TopstepError, TopstepMarket,
                             TopstepPaperBroker)
 
@@ -630,6 +630,40 @@ def check_cache():
     assert db.get_state("s") == [1, 2] and db.get_state("nada", "x") == "x"
 
 
+async def check_alpaca():
+    """Alpaca: solo datos. Sin clave se declaran los pares a mano; las velas se piden con fecha de inicio."""
+    old = config.EXCHANGE_ID, config.SYMBOLS, config.EXCHANGE_API_KEY
+    config.EXCHANGE_ID, config.SYMBOLS, config.EXCHANGE_API_KEY = "alpaca", ["BTC/USD", "ETH/USD"], ""
+    try:
+        ex = make_exchange()
+        assert set(ex.markets) == {"BTC/USD", "ETH/USD"} and not ex.apiKey  # sin red y sin clave
+        await ex.close()
+        config.EXCHANGE_API_KEY = "PK-PRUEBA"
+        ex = make_exchange()  # con clave: se usa para leer, contra el entorno paper
+        assert ex.apiKey == "PK-PRUEBA" and "paper-api" in str(ex.urls["api"]) and not ex.markets
+        await ex.close()
+        config.EXCHANGE_API_KEY = ""
+        m, calls = Market(), []
+
+        async def fetch(symbol, tf, since=None, limit=None):
+            calls.append((since, limit))  # como Alpaca: páginas cortas (aquí 100 velas) desde lo más antiguo
+            first = -(-since // 300_000) * 300_000
+            return [[t, 1, 2, 0.5, 1.5, 9] for t in range(first, min(first + 100 * 300_000, m.ex.milliseconds()), 300_000)]
+
+        m.ex.fetch_ohlcv = fetch
+        df = await m.ohlcv("BTC/USD", "5m", 300)
+        (since, limit), now = calls[0], m.ex.milliseconds()
+        assert limit == 450 and abs(now - since - 450 * 300_000) < 5000 and len(calls) == 5, calls
+        assert len(df) == 300 and df.ts.is_monotonic_increasing and df.ts.is_unique
+        assert now - df.ts.iloc[-1].timestamp() * 1000 < 300_000  # llega hasta la vela en curso, no se queda en la 1.ª página
+        await m.close()
+    finally:
+        config.EXCHANGE_ID, config.SYMBOLS, config.EXCHANGE_API_KEY = old
+    r = subprocess.run([sys.executable, "-c", "import config"], cwd=config.ROOT, capture_output=True, text=True,
+                       env=os.environ | {"EXCHANGE_ID": "alpaca", "PAPER_TRADING": "false"})
+    assert r.returncode != 0 and "solo simula" in r.stderr  # a Alpaca no se le envían órdenes
+
+
 class FakeTopstep(http.server.BaseHTTPRequestHandler):
     """La API de ProjectX en miniatura, en 127.0.0.1. Nada de esta prueba sale a internet."""
 
@@ -941,6 +975,7 @@ if __name__ == "__main__":
     asyncio.run(check_macro())
     check_optimizer()
     asyncio.run(check_backtest())
+    asyncio.run(check_alpaca())
     asyncio.run(check_topstepx())
     print("selfcheck OK: caché, riesgo y costes, 5 agentes, jefe, ciclo completo de operación, evolución "
-          "(muerte, mutación, persistencia), tokens, alertas, broker CCXT, macro, optimizador, backtest y TopstepX (API falsa local, kill switch, sesión y frecuencia)")
+          "(muerte, mutación, persistencia), tokens, alertas, broker CCXT, macro, optimizador, backtest, datos de Alpaca y TopstepX (API falsa local, kill switch, sesión y frecuencia)")
