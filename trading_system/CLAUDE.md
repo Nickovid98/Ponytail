@@ -1,6 +1,6 @@
 # trading_system: guía para Claude
 
-Sistema de day trading multi-agente para cripto (CCXT). El detalle está en
+Sistema de day trading multi-agente para cripto (CCXT) y futuros de Topstep (`BROKER=topstepx`). El detalle está en
 `README.md`; esto es lo mínimo para trabajar sin releer el proyecto entero.
 
 ## Comandos
@@ -19,11 +19,14 @@ Sistema de day trading multi-agente para cripto (CCXT). El detalle está en
 - Todo PnL que se evalúe es neto de comisiones y deslizamiento.
 - Cada cambio de lógica lleva su comprobación en `selfcheck.py`. Las simplificaciones se marcan con `ponytail:` y dicen su techo.
 - No ejecutar código de repositorios externos sin revisarlo antes.
+- TopstepX: el motor solo corre en el ordenador del usuario. Nunca conectar a `api.topstepx.com` desde la nube
+  ni desplegar en un VPS; aquí se prueba contra la API falsa de `selfcheck.py`. El kill switch (75 % del límite
+  diario, techo 80 %) y la verificación del stop tras cada orden no se relajan.
 
 ## Mapa
 
 - `agents/`: `Signal` (contrato), cinco agentes analíticos, `boss_agent.py` (decisión y ejecución), `evolution_manager.py` (muerte y renacimiento).
-- `utils/`: `risk_manager` (stop, tamaño, costes), `trade_logger` (operaciones y genealogía en SQLite), `token_budget`, `cache_manager`, `notifier`, `exchange` (PaperBroker y CcxtBroker), `alpha_vantage`, `db`.
+- `utils/`: `risk_manager` (stop, tamaño, costes), `trade_logger` (operaciones y genealogía en SQLite), `token_budget`, `cache_manager`, `notifier`, `exchange` (PaperBroker y CcxtBroker), `topstepx` (cliente REST, datos y brokers de futuros), `alpha_vantage`, `db`.
 - `main.py` orquesta; `optimizer.py` ajusta pesos; `backtest.py` simula; `dashboard.py` muestra y controla.
 
 ## Skills útiles aquí (`.claude/skills/`)

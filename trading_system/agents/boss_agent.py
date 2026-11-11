@@ -74,10 +74,14 @@ class BossAgent:
         for t in trade_logger.open_trades():
             floating += (await self.market.price(t["symbol"]) - t["entry"]) * t["qty"] * SIGN[t["side"]]
         total = equity + floating
-        today = dt.datetime.now(dt.timezone.utc).date().isoformat()
+        today = risk.trading_day()
         day_start = db.get_state(f"day_start:{mode}:{today}")
         if day_start is None:
-            db.set_state(f"day_start:{mode}:{today}", day_start := total)
+            if hasattr(self.broker, "day_start_equity"):
+                total_0 = await self.broker.day_start_equity()  # descuenta lo ya realizado hoy
+            else:
+                total_0 = total
+            db.set_state(f"day_start:{mode}:{today}", day_start := total_0)
         start = db.get_state(f"start_equity:{mode}")
         if start is None:
             db.set_state(f"start_equity:{mode}", start := total)
@@ -86,12 +90,22 @@ class BossAgent:
         breach = risk.check_limits(total, day_start, start)
         if breach and breach[0] == "total" and not kill.get("on"):
             db.set_state("ctl:kill", kill := {"on": True, "flatten": True, "reason": breach[1]})
+        first_halt = bool(breach) and breach[0] == "daily" and not db.get_state(f"halt:{mode}:{today}")
         if breach and breach[0] == "daily":
-            db.set_state(f"halt:{mode}:{today}", breach[1])
+            if first_halt:
+                log.critical("KILL SWITCH ACTIVADO · %s · sin operar hasta el próximo día operativo", breach[1])
+                self.notify(f"🛑 KILL SWITCH · {breach[1]}")
+            db.set_state(f"halt:{mode}:{today}", breach[1])  # persiste: reiniciar el programa no lo levanta
         if breach or (kill.get("on") and kill.get("flatten", True)):
+            open_before = bool(trade_logger.open_trades()) or first_halt
             await self._flatten("LIMITE" if breach else "KILL")
+            if open_before and hasattr(self.broker, "flatten_all"):
+                await self.broker.flatten_all()  # también lo que no abrió este programa
+        allow_entries, must_flatten = risk.session()
+        if must_flatten:
+            await self._flatten("SESION")  # fin de la sesión: nada queda abierto
         blocked = (kill.get("reason") or "kill switch activado") if kill.get("on") \
-            else db.get_state(f"halt:{mode}:{today}")
+            else db.get_state(f"halt:{mode}:{today}") or (None if allow_entries else "fuera del horario de entradas")
 
         db.set_state("account", {
             "equity": equity, "floating": floating, "day_pnl": total - day_start,
@@ -127,6 +141,17 @@ class BossAgent:
             return "máximo de posiciones abiertas", None
         if time.time() - trade_logger.last_close_ts(d.symbol) < config.COOLDOWN_S:
             return "enfriamiento tras el último cierre", None
+        # Frecuencia: tope de operaciones por día y espera mínima entre entradas. Son límites
+        # reales de la operativa, no un disfraz: este motor decide cada 30-60 s, no en milisegundos.
+        entries = trade_logger.entries_since(time.time() - 86400)
+        today = risk.trading_day()
+        if config.MAX_TRADES_PER_DAY and sum(
+                risk.trading_day(dt.datetime.fromtimestamp(ts, dt.timezone.utc)) == today
+                for ts in entries) >= config.MAX_TRADES_PER_DAY:
+            return "máximo de operaciones del día alcanzado", None
+        last = max(entries[-1] if entries else 0, db.get_state("order:last_attempt", 0))
+        if time.time() - last < config.MIN_ORDER_GAP_S:
+            return "espera mínima entre órdenes", None
 
         price = await self.market.price(d.symbol)
         atr_v = risk.atr(await self.market.ohlcv(d.symbol, config.ATR_TIMEFRAME, 100))
@@ -141,7 +166,23 @@ class BossAgent:
                 return "esperando aprobación manual", plan
             db.set_state(f"approve:{d.symbol}", 0)
 
-        fill = await self.broker.open(d.symbol, d.action, plan["qty"], plan["sl"], plan["tp"], price)
+        db.set_state("order:last_attempt", time.time())
+        try:
+            fill = await self.broker.open(d.symbol, d.action, plan["qty"], plan["sl"], plan["tp"], price)
+        except ValueError as e:  # la orden no cumple las reglas del broker: no llegó a enviarse
+            return f"orden descartada: {e}", None
+        except Exception as e:
+            # A un broker que rechaza no se le insiste: a la tercera seguida se para hasta mañana.
+            fails = db.get_state("order:fails", 0) + 1
+            log.exception("Orden fallida en %s (%d seguidas)", d.symbol, fails)
+            if fails >= 3:
+                fails = 0
+                db.set_state(f"halt:{config.EXECUTION_MODE}:{risk.trading_day()}", "3 órdenes fallidas seguidas")
+                self.notify("🛑 Motor detenido hasta mañana: 3 órdenes fallidas seguidas")
+            db.set_state("order:fails", fails)
+            return f"orden rechazada ({type(e).__name__})", None
+        db.set_state("order:fails", 0)
+        plan |= {"sl": fill.get("sl", plan["sl"]), "tp": fill.get("tp", plan["tp"])}  # niveles reales si el broker los da
         trade_logger.log_open(d.symbol, d.action, fill["qty"], fill["price"], plan["sl"], plan["tp"],
                               d.score, d.votes, fill["meta"], fill["fee"], fill["slippage"])
         msg = (f"ABIERTA {d.action} {d.symbol} · qty {fill['qty']:.6g} · entrada {fill['price']:.6g} · "

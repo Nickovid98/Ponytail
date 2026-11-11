@@ -187,6 +187,66 @@ cuentan en el denominador, así que hace falta acuerdo amplio. Opera si
 Los pesos de cada agente salen de su historial de aciertos (`optimizer.py`, una
 vez por semana, o `python optimizer.py --dry-run`).
 
+## Topstep: futuros con TopstepX (`utils/topstepx.py`)
+
+Con `BROKER=topstepx` el mismo motor opera futuros de una cuenta de Topstep a
+través de la API de ProjectX (`https://api.topstepx.com`). Los agentes, el jefe
+y la evolución no cambian; cambian los datos, la ejecución y los límites.
+
+**Se ejecuta solo en tu ordenador.** Topstep exige que toda la actividad salga
+de un dispositivo propio, sin VPS, VPN ni acceso remoto. No lo despliegues en
+AWS, Google Cloud, DigitalOcean ni similares, ni lo arranques desde una sesión
+en la nube.
+
+```env
+BROKER=topstepx
+SYMBOLS=MNQ                      # raíz del contrato; se resuelve al vencimiento activo
+TOPSTEPX_USERNAME=tu_usuario
+TOPSTEPX_API_KEY=tu_clave        # solo aquí, en .env; nunca en el código ni en el chat
+TOPSTEPX_ACCOUNT_ID=             # obligatorio si tienes más de una cuenta operable
+PROP_DAILY_LOSS_LIMIT_USD=1000   # el límite diario de TU cuenta, tal como lo muestra Topstep
+PROP_ACCOUNT_FLOOR_USD=48000     # saldo en el que pierdes la cuenta (Maximum Loss Limit de hoy)
+PROP_KILL_AT_PCT=75              # el cierre forzoso salta al 75 % del límite (techo: 80)
+PROP_MAX_CONTRACTS=1
+CAPITAL=50000                    # solo para la simulación
+TOTAL_LOSS_LIMIT_USD=0
+```
+
+Los dos importes son los de tu cuenta: el programa no los adivina y no arranca
+sin el primero. El suelo de la cuenta se mueve al cierre de cada día con
+beneficio, así que hay que actualizarlo a mano.
+
+| Regla | Cómo se cumple |
+|---|---|
+| Límite de pérdida diaria | En cada ciclo (30 s) se suma lo realizado y lo flotante desde las 17:00 de Chicago. Al llegar al 75 % del límite, o del margen que quede hasta el suelo de la cuenta si es menor, se cierran todas las posiciones, se cancelan todas las órdenes y el motor queda parado hasta el siguiente día operativo. El bloqueo se guarda en SQLite: reiniciar no lo levanta. |
+| Reinicio a media sesión | El saldo de inicio del día se reconstruye con las ejecuciones de hoy, de modo que lo ya perdido sigue contando. |
+| Stop siempre en el servidor | La entrada lleva stop y objetivo en la misma orden. Después se comprueba en la cuenta que existe la posición y un stop del lado correcto; si no, se cierra en el acto. |
+| Frecuencia | Decisiones cada 30-60 s, 60 s mínimos entre órdenes, 15 min de espera por contrato tras un cierre, 10 operaciones al día como máximo, stops de más de 5 ticks y una petición a la API cada 0,35 s como mucho. Tres órdenes fallidas seguidas detienen el motor hasta mañana. |
+| Horario | Sin entradas desde las 14:30 y todo cerrado a las 15:00, hora de Chicago (`PROP_LAST_ENTRY_CT`, `PROP_FLAT_BY_CT`). |
+| Auditoría | Cada petición, respuesta HTTP, error de conexión, cambio de estado de una orden y activación del kill switch va a la consola y a `trading.log` (20 MB por archivo, 10 archivos). La clave y el token nunca se escriben. |
+
+Orden recomendado: primero `PAPER_TRADING=True` (datos reales de TopstepX,
+órdenes simuladas con contratos enteros, 1 tick de deslizamiento y comisión por
+contrato). Para enviar órdenes a la cuenta: `PAPER_TRADING=False` y
+`CONFIRM_LIVE=SI_ARRIESGO_DINERO_REAL`, con 1 micro y mirando `trading.log`.
+
+Lo que no está comprobado contra el servicio real, porque este código solo se
+ha probado con una API falsa local (`selfcheck.py`):
+
+- Los nombres exactos de los campos de cada respuesta. Si alguno difiere, el
+  motor falla al arrancar o al verificar la orden, no en silencio.
+- El signo de los ticks en los brackets. Por defecto van con signo (stop de un
+  largo en negativo). Si la plataforma rechaza la orden, prueba
+  `PROP_BRACKET_SIGNED=false`; si el stop quedara del lado equivocado, la
+  verificación cierra la posición.
+- Si tienes brackets automáticos activados en la plataforma, desactívalos:
+  se sumarían a los de la orden.
+
+Simplificaciones: precio y estado de las posiciones se consultan por REST (hasta
+5 s de retraso) en lugar de los hubs en tiempo real de `rtc.topstepx.com`; no
+hay libro de órdenes, así que el agente de sentimiento trabaja sin él; y
+`backtest.py` no descarga históricos de futuros.
+
 ## Backtest (`backtest.py`)
 
 ```bash

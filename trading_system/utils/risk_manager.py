@@ -3,13 +3,42 @@
 Las comisiones y el deslizamiento se descuentan del PnL antes de que nadie lo
 evalúe: ni el optimizador ni el gestor de evolución ven nunca un PnL bruto.
 """
+import datetime as dt
 import math
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 import config
 
 PAPER_TRADING = config.PAPER_TRADING
+CHICAGO = ZoneInfo("America/Chicago")
+
+
+def trading_day(now: dt.datetime | None = None) -> str:
+    """Día operativo. Cripto: fecha UTC. Topstep: empieza a las 17:00 de Chicago del día anterior."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    if config.BROKER != "topstepx":
+        return now.astimezone(dt.timezone.utc).date().isoformat()
+    return (now.astimezone(CHICAGO) + dt.timedelta(hours=7)).date().isoformat()
+
+
+def day_open(now: dt.datetime | None = None) -> dt.datetime:
+    """Inicio del día operativo de futuros en curso: las 17:00 de Chicago más recientes."""
+    t = (now or dt.datetime.now(dt.timezone.utc)).astimezone(CHICAGO)
+    d = t.replace(hour=17, minute=0, second=0, microsecond=0)
+    return d if t >= d else d - dt.timedelta(days=1)
+
+
+def session(now: dt.datetime | None = None) -> tuple[bool, bool]:
+    """(se permiten entradas nuevas, hay que cerrarlo todo). Fuera de Topstep siempre (True, False)."""
+    if config.BROKER != "topstepx":
+        return True, False
+    t = (now or dt.datetime.now(dt.timezone.utc)).astimezone(CHICAGO)
+    hm, wd = t.strftime("%H:%M"), t.weekday()
+    if wd == 5 or (wd == 4 and hm >= "17:00") or (wd == 6 and hm < "17:00"):
+        return False, False  # fin de semana: mercado cerrado
+    return hm >= "17:00" or hm < config.PROP_LAST_ENTRY_CT, config.PROP_FLAT_BY_CT <= hm < "17:00"
 
 
 def atr(df: pd.DataFrame, n: int = 14) -> float:
@@ -76,8 +105,19 @@ def build_plan(side: str, entry: float, atr_v: float, equity: float,
 def check_limits(total: float, day_start: float, start: float) -> tuple[str, str] | None:
     """Devuelve ("total"|"daily", motivo) si se rompió un límite de pérdida.
     `total` es el capital con el PnL flotante incluido."""
-    if start - total >= config.TOTAL_LOSS_LIMIT_USD:
+    if config.TOTAL_LOSS_LIMIT_USD > 0 and start - total >= config.TOTAL_LOSS_LIMIT_USD:
         return "total", f"pérdida total {start - total:.2f} >= límite {config.TOTAL_LOSS_LIMIT_USD:.0f} {config.QUOTE}"
+    if config.PROP_DAILY_LOSS_LIMIT_USD > 0:
+        # Prop firm: el límite es en dólares y el cierre salta ANTES de tocarlo, para que el
+        # deslizamiento del cierre no lo rebase. Si la cuenta tiene un suelo (Max Loss Limit),
+        # manda lo que quede hasta él cuando sea menos que el límite diario.
+        limit = config.PROP_DAILY_LOSS_LIMIT_USD
+        if config.PROP_ACCOUNT_FLOOR_USD > 0:
+            limit = min(limit, day_start - config.PROP_ACCOUNT_FLOOR_USD)
+        if day_start - total >= limit * config.PROP_KILL_AT_PCT / 100:
+            return "daily", (f"kill switch: pérdida del día {day_start - total:.2f} >= {config.PROP_KILL_AT_PCT:g}% "
+                             f"del límite de {limit:.2f} USD")
+        return None
     if day_start - total >= day_start * config.DAILY_LOSS_LIMIT_PCT / 100:
         return "daily", f"pérdida del día {day_start - total:.2f} >= {config.DAILY_LOSS_LIMIT_PCT}% del capital"
     return None

@@ -5,6 +5,7 @@
 """
 import asyncio
 import logging
+import logging.handlers
 import sys
 import time
 
@@ -77,21 +78,24 @@ async def optimizer_loop() -> None:
 
 
 async def main(once: bool = False) -> None:
-    market = Market()
+    if config.BROKER == "topstepx":
+        from utils.topstepx import TopstepBroker, TopstepMarket, TopstepPaperBroker
+        market = TopstepMarket()
+        make_broker = TopstepPaperBroker if config.PAPER_TRADING else TopstepBroker
+    else:
+        market = Market()
+        make_broker = PaperBroker if config.PAPER_TRADING else CcxtBroker
     try:
-        await market.ex.load_markets()
-        missing = [s for s in config.SYMBOLS if s not in market.ex.markets]
-        if missing:
-            raise SystemExit(f"Símbolos desconocidos en {config.EXCHANGE_ID}: {missing}")
+        await market.start()
         # Carga de SQLite la versión más alta de cada agente, con sus reglas.
         evo = EvolutionManager(notify=notifier.send, base_prompts={"macro": macro_agent.SYSTEM})
-        broker = PaperBroker(market) if config.PAPER_TRADING else CcxtBroker(market)
+        broker = make_broker(market)
         agents = [HistorianAgent(), MacroAgent(system=lambda: evo.instructions("macro")), SMCAgent(),
                   WyckoffAgent(), SentimentAgent()]
         boss = BossAgent(market, broker, {a.name: 3 * a.interval + 60 for a in agents}, evo, notifier.send)
         log.info("%s en %s · %s · riesgo %.1f%%/op · comisión %.3f%% + deslizamiento %.3f%% por lado · Claude %s",
                  {"paper": "PAPER TRADING", "sandbox": "SANDBOX", "live": "REAL TRADING"}[config.EXECUTION_MODE],
-                 config.EXCHANGE_ID, ", ".join(config.SYMBOLS), config.RISK_PER_TRADE_PCT, config.FEE_PCT,
+                 "TopstepX" if config.BROKER == "topstepx" else config.EXCHANGE_ID, ", ".join(config.SYMBOLS), config.RISK_PER_TRADE_PCT, config.FEE_PCT,
                  config.SLIPPAGE_PCT,
                  config.CLAUDE_MODEL if config.USE_CLAUDE else "desactivado (sin ANTHROPIC_API_KEY)")
         log.info("Generaciones activas: %s", ", ".join(g["name"] for g in evo.active.values()))
@@ -113,7 +117,10 @@ async def main(once: bool = False) -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+                        handlers=[logging.StreamHandler(),  # auditoría: consola y trading.log
+                                  logging.handlers.RotatingFileHandler(
+                                      config.LOG_FILE, maxBytes=20_000_000, backupCount=10, encoding="utf-8")])
     try:
         asyncio.run(main(once="--once" in sys.argv))
     except KeyboardInterrupt:

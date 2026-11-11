@@ -38,6 +38,12 @@ class Market:
             else:
                 self.ex.set_sandbox_mode(True)
 
+    async def start(self) -> None:
+        await self.ex.load_markets()
+        missing = [s for s in config.SYMBOLS if s not in self.ex.markets]
+        if missing:
+            raise SystemExit(f"Símbolos desconocidos en {config.EXCHANGE_ID}: {missing}")
+
     async def ohlcv(self, symbol: str, tf: str, limit: int = 300) -> pd.DataFrame:
         key = f"ohlcv:{config.EXCHANGE_ID}:{config.EXECUTION_MODE}:{symbol}:{tf}:{limit}"
         rows = cache.cache_get(key)
@@ -85,13 +91,23 @@ class PaperBroker:
     async def equity(self) -> float:
         return config.CAPITAL + trade_logger.realized_pnl()
 
-    @staticmethod
-    def _fill(ref: float, qty: float, buying: bool, market_order: bool = True, **extra) -> dict:
-        price = rm.slip(ref, buying) if market_order else ref
-        return {"price": price, "qty": qty, "fee": rm.fee(price, qty), "slippage": abs(price - ref) * qty, **extra}
+    # Tres ganchos que redefine la simulación de futuros (contratos enteros, costes por contrato).
+    def _size(self, symbol, qty):
+        return qty
+
+    def _slip(self, symbol, ref, buying):
+        return rm.slip(ref, buying)
+
+    def _fee(self, symbol, price, qty):
+        return rm.fee(price, qty)
+
+    def _fill(self, symbol, ref: float, qty: float, buying: bool, market_order: bool = True, **extra) -> dict:
+        price = self._slip(symbol, ref, buying) if market_order else ref
+        return {"price": price, "qty": qty, "fee": self._fee(symbol, price, qty),
+                "slippage": abs(price - ref) * qty, **extra}
 
     async def open(self, symbol, side, qty, sl, tp, ref_price) -> dict:
-        return self._fill(ref_price, qty, buying=side == "LONG", meta={})
+        return self._fill(symbol, ref_price, self._size(symbol, qty), buying=side == "LONG", meta={})
 
     async def check_exit(self, t: dict) -> dict | None:
         # ponytail: SL/TP se evalúan con velas de 1m (cacheadas 60 s) más el
@@ -106,13 +122,13 @@ class PaperBroker:
         long = t["side"] == "LONG"
         # Si una misma vela toca ambos niveles se asume el stop: lo conservador.
         if (lo <= t["sl"]) if long else (hi >= t["sl"]):
-            return self._fill(t["sl"], t["qty"], buying=not long, reason="SL")  # el stop es orden a mercado
+            return self._fill(t["symbol"], t["sl"], t["qty"], buying=not long, reason="SL")  # el stop es orden a mercado
         if (hi >= t["tp"]) if long else (lo <= t["tp"]):
-            return self._fill(t["tp"], t["qty"], buying=not long, market_order=False, reason="TP")  # límite
+            return self._fill(t["symbol"], t["tp"], t["qty"], buying=not long, market_order=False, reason="TP")  # límite
         return None
 
     async def close(self, t: dict) -> dict:
-        return self._fill(await self.market.price(t["symbol"]), t["qty"], buying=t["side"] != "LONG")
+        return self._fill(t["symbol"], await self.market.price(t["symbol"]), t["qty"], buying=t["side"] != "LONG")
 
 
 class CcxtBroker:

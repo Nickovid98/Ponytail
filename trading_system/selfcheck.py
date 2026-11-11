@@ -6,6 +6,7 @@ script falla.
 """
 import asyncio
 import datetime as dt
+import http.server
 import json
 import logging
 import os
@@ -13,6 +14,7 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import types
 
@@ -44,6 +46,8 @@ from agents.wyckoff_agent import WyckoffAgent
 from utils import alpha_vantage, cache_manager, db, notifier, token_budget, trade_logger
 from utils import risk_manager as risk
 from utils.exchange import CcxtBroker, PaperBroker
+from utils.topstepx import (TopstepBroker, TopstepClient, TopstepError, TopstepMarket,
+                            TopstepPaperBroker)
 
 SYM = "BTC/USDT:USDT"
 rng = np.random.default_rng(7)
@@ -626,6 +630,305 @@ def check_cache():
     assert db.get_state("s") == [1, 2] and db.get_state("nada", "x") == "x"
 
 
+class FakeTopstep(http.server.BaseHTTPRequestHandler):
+    """La API de ProjectX en miniatura, en 127.0.0.1. Nada de esta prueba sale a internet."""
+
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        s, path = self.server.state, self.path
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        s["calls"].append((path, body))
+        status, out = 200, {"success": True, "errorCode": 0, "errorMessage": None}
+        if path == "/api/Auth/loginKey":
+            if body == {"userName": "yo", "apiKey": "CLAVE-SECRETA"}:
+                s["n"] += 1
+                out["token"] = f"JWT-{s['n']}"
+            else:
+                out = {"success": False, "errorCode": 3, "errorMessage": "credenciales"}
+        elif s.pop("expire", False) or self.headers.get("Authorization") != f"Bearer JWT-{s['n']}":
+            status, out = 401, {}
+        elif s.get("busy"):
+            status, out = 429, {}
+        elif path == "/api/Account/search":
+            out["accounts"] = s["accounts"]
+        elif path == "/api/Contract/search":
+            out["contracts"] = [c for c in s["contracts"] if body["searchText"] in c["name"]]
+        elif path == "/api/History/retrieveBars":
+            out["bars"] = s["bars"]
+        elif path == "/api/Order/place":
+            if s.get("reject"):
+                out = {"success": False, "errorCode": 2, "errorMessage": "orden rechazada"}
+            else:
+                out["orderId"], cid = 77, body["contractId"]
+                s["positions"] = [{"contractId": cid, "size": body["size"], "averagePrice": 20000.5,
+                                   "type": 1 if body["side"] == 0 else 2}]
+                # Semántica con signo, como la plataforma: precio = entrada + ticks x tamaño del tick.
+                s["working"] = [] if s.get("no_brackets") else [
+                    {"id": 78, "contractId": cid, "type": 4,
+                     "stopPrice": 20000.5 + body["stopLossBracket"]["ticks"] * 0.25},
+                    {"id": 79, "contractId": cid, "type": 1,
+                     "limitPrice": 20000.5 + body["takeProfitBracket"]["ticks"] * 0.25}]
+        elif path == "/api/Order/searchOpen":
+            out["orders"] = s["working"]
+        elif path == "/api/Order/cancel":
+            s["working"] = [o for o in s["working"] if o["id"] != body["orderId"]]
+        elif path == "/api/Position/searchOpen":
+            out["positions"] = s["positions"]
+        elif path == "/api/Position/closeContract":
+            s["positions"] = [p for p in s["positions"] if p["contractId"] != body["contractId"]]
+            s["closed"].append(body["contractId"])
+        elif path == "/api/Trade/search":
+            out["trades"] = s["trades"]
+        else:
+            status = 404
+        data = json.dumps(out).encode()
+        self.send_response(status)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+class Capture(logging.Handler):
+    def __init__(self):
+        super().__init__(logging.INFO)
+        self.lines = []
+
+    def emit(self, record):
+        self.lines.append((record.levelname, record.getMessage()))
+
+
+async def check_topstepx():
+    cfg = lambda **kw: [setattr(config, k, v) for k, v in kw.items()]
+    # 1) Candados de configuración: sin el límite de tu cuenta no arranca, y las órdenes reales exigen confirmación.
+    run = lambda **env: subprocess.run(
+        [sys.executable, "-c", "import config as c; print(c.EXECUTION_MODE, c.FEE_PCT, c.PROP_KILL_AT_PCT, "
+                               "c.TOTAL_LOSS_LIMIT_USD, c.MAX_TRADES_PER_DAY)"],
+        cwd=config.ROOT, env=os.environ | {"BROKER": "topstepx", "TOTAL_LOSS_LIMIT_USD": ""} | env,
+        capture_output=True, text=True)
+    assert "PROP_DAILY_LOSS_LIMIT_USD" in run().stderr and run().returncode != 0
+    ok = run(PROP_DAILY_LOSS_LIMIT_USD="1000", PROP_KILL_AT_PCT="95")  # el 95 % pedido se queda en el 80 %
+    assert ok.stdout.split() == ["paper", "0.0", "80.0", "0.0", "10"], (ok.stdout, ok.stderr)
+    assert run(PROP_DAILY_LOSS_LIMIT_USD="1000", PAPER_TRADING="false").returncode != 0
+    live = run(PROP_DAILY_LOSS_LIMIT_USD="1000", PAPER_TRADING="false", CONFIRM_LIVE="SI_ARRIESGO_DINERO_REAL")
+    assert live.stdout.split()[0] == "live"
+
+    cfg(BROKER="topstepx", EXECUTION_MODE="prop", FEE_PCT=0.0, SLIPPAGE_PCT=0.0, MIN_NOTIONAL=0.0, MAX_LEVERAGE=1e9,
+        TOTAL_LOSS_LIMIT_USD=0.0, CAPITAL=50000.0, PROP_DAILY_LOSS_LIMIT_USD=1000.0, PROP_KILL_AT_PCT=75.0,
+        PROP_ACCOUNT_FLOOR_USD=0.0, PROP_MAX_CONTRACTS=3, PROP_VERIFY_WAIT_S=0.01, MAX_TRADES_PER_DAY=10,
+        MIN_ORDER_GAP_S=60.0, TOPSTEPX_USERNAME="yo", TOPSTEPX_API_KEY="CLAVE-SECRETA", TOPSTEPX_ACCOUNT_ID="")
+
+    # 2) Día operativo y horario, en hora de Chicago (noviembre: UTC-6).
+    utc = lambda *a: dt.datetime(*a, tzinfo=dt.timezone.utc)
+    assert risk.trading_day(utc(2026, 11, 11, 22, 59)) == "2026-11-11"  # 16:59 en Chicago
+    assert risk.trading_day(utc(2026, 11, 11, 23, 0)) == "2026-11-12"  # 17:00: empieza el día siguiente
+    assert risk.day_open(utc(2026, 11, 11, 22, 59)) == utc(2026, 11, 10, 23, 0)
+    assert risk.session(utc(2026, 11, 11, 16, 0)) == (True, False)  # 10:00
+    assert risk.session(utc(2026, 11, 11, 20, 45)) == (False, False)  # 14:45: ya no se entra
+    assert risk.session(utc(2026, 11, 11, 21, 5)) == (False, True)  # 15:05: todo fuera
+    assert risk.session(utc(2026, 11, 11, 23, 30)) == (True, False)  # 17:30: sesión nueva
+    assert risk.session(utc(2026, 11, 14, 18, 0)) == (False, False)  # sábado
+    assert risk.session(utc(2026, 11, 13, 23, 30)) == (False, False)  # viernes por la tarde: cerrado
+
+    # 3) Kill switch: salta al 75 % del límite diario, o de lo que quede hasta el suelo de la cuenta.
+    assert risk.check_limits(50000 - 749, 50000, 50000) is None
+    assert risk.check_limits(50000 - 750, 50000, 50000)[0] == "daily"
+    assert risk.check_limits(45000, 45000, 50000) is None  # sin límite total fijo: manda el suelo
+    config.PROP_ACCOUNT_FLOOR_USD = 49600.0
+    assert risk.check_limits(50000 - 299, 50000, 50000) is None
+    assert risk.check_limits(50000 - 300, 50000, 50000)[0] == "daily"  # quedan 400 hasta el suelo: 75 % = 300
+    config.PROP_ACCOUNT_FLOOR_USD = 0.0
+
+    # 4) Cliente REST contra la API falsa: registro de auditoría sin secretos, token renovado, errores de red.
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeTopstep)
+    s = srv.state = {
+        "calls": [], "n": 0, "positions": [], "working": [], "trades": [], "closed": [],
+        "accounts": [{"id": 9, "name": "50K-EVAL", "balance": 50000.0, "canTrade": True},
+                     {"id": 8, "name": "VIEJA", "balance": 1.0, "canTrade": False}],
+        "contracts": [{"id": "CON.F.US.MNQ.Z26", "name": "MNQZ6", "tickSize": 0.25, "tickValue": 0.5,
+                       "activeContract": True},
+                      {"id": "CON.F.US.MNQ.H27", "name": "MNQH7", "tickSize": 0.25, "tickValue": 0.5,
+                       "activeContract": False},
+                      {"id": "CON.F.US.ENQ.Z26", "name": "NQZ6", "tickSize": 0.25, "tickValue": 5.0,
+                       "activeContract": True}],
+        "bars": [{"t": f"2026-11-11T15:{m:02d}:00+00:00", "o": 20000, "h": 20002, "l": 19998, "c": 20000 + m, "v": 5}
+                 for m in range(30)]}
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    config.TOPSTEPX_API_URL = f"http://127.0.0.1:{srv.server_port}"
+    cap = Capture()
+    logging.getLogger().addHandler(cap)
+    logging.getLogger().setLevel(logging.INFO)
+    said = lambda text, level=None: any(text in m and level in (None, lv) for lv, m in cap.lines)
+
+    api = TopstepClient()
+    api.gap = 0
+    config.SYMBOLS = ["MNQ", "NQ"]
+    market = TopstepMarket(api)
+    await market.start()
+    assert market.account_id == 9  # la única cuenta operable
+    assert market.contracts["MNQ"]["id"] == "CON.F.US.MNQ.Z26" and market.contracts["NQ"]["id"] == "CON.F.US.ENQ.Z26"
+    assert market.point_value("MNQ") == 2.0 and market.point_value("NQ") == 20.0 and market.tick("MNQ") == 0.25
+    assert said("-> POST /api/Auth/loginKey") and said("<- /api/Account/search HTTP 200")
+    assert not said("CLAVE-SECRETA") and not said("JWT-"), "un secreto llegó al log"
+    s["expire"] = True  # el token caduca: se renueva solo y la petición se repite una vez
+    df = await market.ohlcv("MNQ", "15m", 20)
+    assert list(df.columns) == ["ts", "open", "high", "low", "close", "volume"] and len(df) == 20 and s["n"] == 2
+    assert df.ts.is_monotonic_increasing and df.close.iloc[-1] == 20029
+    assert await market.price("MNQ") == 20029.0
+    s["busy"] = True
+    try:
+        await api.post("/api/Account/search")
+        raise AssertionError("un 429 debe tratarse como fallo pasajero")
+    except ConnectionError:
+        pass
+    s["busy"] = False
+    dead = TopstepClient()
+    dead.gap, dead.token, dead.token_ts = 0, "x", time.time()
+    config.TOPSTEPX_API_URL, url = "http://127.0.0.1:9", config.TOPSTEPX_API_URL
+    try:
+        await dead.post("/api/Account/search")
+        raise AssertionError("sin conexión debe fallar")
+    except ConnectionError:
+        assert said("sin conexión", "ERROR")
+    config.TOPSTEPX_API_URL = url
+    config.TOPSTEPX_ACCOUNT_ID = "8"  # cuenta no operable: no arranca
+    try:
+        await TopstepMarket(api).start()
+        raise AssertionError("debió negarse")
+    except SystemExit:
+        config.TOPSTEPX_ACCOUNT_ID = ""
+
+    # 5) Órdenes reales (contra la API falsa): contratos enteros, brackets en el servidor y verificación.
+    broker = TopstepBroker(market)
+    assert await broker.equity() == 50000.0
+    for bad in [("MNQ", "LONG", 1.9, 19990, 20020, 20000),  # no llega a 1 contrato
+                ("MNQ", "LONG", 6.0, 19999, 20020, 20000)]:  # stop a 4 ticks
+        try:
+            await broker.open(*bad)
+            raise AssertionError(bad)
+        except ValueError:
+            pass
+    assert not [c for c in s["calls"] if c[0] == "/api/Order/place"]  # ninguna de las dos llegó a enviarse
+    fill = await broker.open("MNQ", "LONG", 99.0, 19990.0, 20020.0, 20000.0)  # 99 $/punto: 49 contratos pedidos
+    (place,) = [b for p, b in s["calls"] if p == "/api/Order/place"]
+    assert place == {"accountId": 9, "contractId": "CON.F.US.MNQ.Z26", "type": 2, "side": 0, "size": 3,
+                     "stopLossBracket": {"ticks": -40, "type": 4}, "takeProfitBracket": {"ticks": 80, "type": 1}}, place
+    assert fill["price"] == 20000.5 and fill["qty"] == 6.0 and fill["sl"] == 19990.5 and fill["tp"] == 20020.5
+    assert fill["fee"] == 4.5 and fill["meta"]["contracts"] == 3 and said("POSICIÓN ABIERTA LONG 3 x MNQ")
+    t = {"symbol": "MNQ", "side": "LONG", "opened_ts": time.time(), "meta": fill["meta"],
+         "sl": fill["sl"], "tp": fill["tp"], "qty": fill["qty"]}
+    assert await broker.check_exit(t) is None
+    s["positions"] = []  # salta el stop en el servidor
+    s["working"] = [o for o in s["working"] if o["type"] == 1]
+    s["trades"] = [{"contractId": "CON.F.US.MNQ.Z26", "price": 20000.5, "size": 3, "profitAndLoss": None, "fees": 1.1},
+                   {"contractId": "CON.F.US.MNQ.Z26", "price": 19990.25, "size": 3, "profitAndLoss": -61.5, "fees": 1.11}]
+    res = await broker.check_exit(t)
+    assert res["reason"] == "SL" and res["price"] == 19990.25 and res["fee"] == 1.11 and s["working"] == []
+    assert abs(await broker.day_start_equity() - (50000 + 61.5 + 2.21)) < 1e-9  # el día empezó antes de la pérdida
+
+    s["no_brackets"] = True  # la plataforma no crea el stop: la posición no se deja viva
+    try:
+        await broker.open("MNQ", "SHORT", 6.0, 20010.0, 19980.0, 20000.0)
+        raise AssertionError("una posición sin stop debe cerrarse")
+    except TopstepError:
+        assert s["positions"] == [] and s["closed"] == ["CON.F.US.MNQ.Z26"] and said("SIN STOP", "CRITICAL")
+    s["no_brackets"], config.PROP_BRACKET_SIGNED = False, False  # signo mal configurado: el stop queda del lado malo
+    try:
+        await broker.open("MNQ", "SHORT", 6.0, 20010.0, 19980.0, 20000.0)
+        raise AssertionError("un stop en el lado equivocado no cuenta como stop")
+    except TopstepError:
+        assert s["positions"] == [] and s["working"] == []
+    config.PROP_BRACKET_SIGNED = True
+    fill = await broker.open("MNQ", "SHORT", 6.0, 20010.0, 19980.0, 20000.0)
+    assert fill["sl"] == 20010.5 and fill["tp"] == 19980.5
+    s["positions"].append({"contractId": "CON.F.US.ENQ.Z26", "size": 1, "averagePrice": 1.0, "type": 1})
+    await broker.flatten_all()  # cierre total: órdenes y posiciones, también las ajenas al programa
+    assert s["positions"] == [] and s["working"] == [] and said("CIERRE TOTAL", "CRITICAL")
+    s["reject"] = True
+    try:
+        await broker.open("MNQ", "LONG", 6.0, 19990.0, 20020.0, 20000.0)
+        raise AssertionError("un rechazo debe propagarse")
+    except TopstepError as e:
+        assert "orden rechazada" in str(e)
+    srv.shutdown()
+    assert not said("CLAVE-SECRETA") and not said("JWT-"), "un secreto llegó al log"
+
+    # 6) El jefe con la simulación de futuros: contratos enteros, costes por contrato, frecuencia,
+    #    cierre de sesión y kill switch.
+    class Futures(FakeMarket):
+        tick = lambda self, symbol: 0.25
+        point_value = lambda self, symbol: 2.0
+
+    class Sim(TopstepPaperBroker):
+        flats, fail = 0, False
+
+        async def flatten_all(self):
+            self.flats += 1
+
+        async def open(self, *a):
+            if self.fail:
+                raise RuntimeError("rechazo del broker")
+            return await super().open(*a)
+
+    config.SYMBOLS = [SYM]
+    for key in ("ctl:kill", "order:fails", "order:last_attempt"):
+        db.del_state(key)
+    db.set_state("ctl:mode", "AUTO")
+    real_session, real_day = risk.session, risk.trading_day
+    risk.session = lambda now=None: (True, False)
+    fm, notes = Futures(), []
+    evo = EvolutionManager(notify=notes.append)
+    sim = Sim(fm)
+    boss = BossAgent(fm, sim, {n: 600 for n in AGENT_LABELS}, evo, notes.append)
+    status = lambda: db.get_state(f"boss:{SYM}")["status"]
+    gens = lambda: {a: g["version"] for a, g in evo.active.items()}
+
+    async def cycle():
+        for name in AGENT_LABELS:
+            db.set_state(f"signal:{name}:{SYM}", token_budget.pack(evo.apply(sig(name, "LONG", 80))))
+        await boss.tick()
+        await evo.drain()
+        return status()
+
+    born = gens()
+    assert await cycle() == "orden ejecutada"
+    (t,) = trade_logger.open_trades()
+    assert t["qty"] == 6.0 and t["entry"] == 100.25 and t["fees"] == 4.5, t  # 3 contratos, 1 tick peor, 1,5 USD c/u
+    risk.session = lambda now=None: (False, True)  # 15:00 de Chicago: nada queda abierto
+    assert (await cycle()).startswith("bloqueado: fuera del horario") and not trade_logger.open_trades()
+    c = trade_logger.closed_trades(mode="prop")[-1]
+    assert c["exit_reason"] == "SESION" and abs(c["pnl"] - ((99.75 - 100.25) * 6 - 9)) < 1e-9, c
+    assert gens() == born  # un cierre por horario no mata a ningún agente
+    risk.session = lambda now=None: (True, False)
+    config.COOLDOWN_S = 0
+    assert await cycle() == "espera mínima entre órdenes"
+    cfg(MIN_ORDER_GAP_S=0.0, MAX_TRADES_PER_DAY=1)
+    assert await cycle() == "máximo de operaciones del día alcanzado"
+    config.MAX_TRADES_PER_DAY = 0
+    assert await cycle() == "orden ejecutada"
+    # Ya se perdieron 12 USD hoy. Con un límite de 26, el cierre forzoso salta al llegar a 19,5.
+    config.PROP_DAILY_LOSS_LIMIT_USD = 26.0
+    assert await cycle() == "posición ya abierta" and sim.flats == 0
+    fm.p = 98.9  # 8,1 USD de pérdida flotante: 20,1 en el día, sin tocar todavía el stop (98,5)
+    assert (await cycle()).startswith("bloqueado: kill switch") and not trade_logger.open_trades()
+    c = trade_logger.closed_trades(mode="prop")[-1]
+    assert c["exit_reason"] == "LIMITE" and sim.flats == 1 and gens() == born, c
+    assert said("KILL SWITCH ACTIVADO", "CRITICAL") and any(n.startswith("🛑 KILL SWITCH") for n in notes)
+    fm.p = 100.0
+    assert (await cycle()).startswith("bloqueado: kill switch") and sim.flats == 1  # sigue parado y no repite el cierre
+    boss = BossAgent(fm, sim, {n: 600 for n in AGENT_LABELS}, evo, notes.append)  # reiniciar no lo levanta
+    assert (await cycle()).startswith("bloqueado: kill switch")
+    risk.trading_day = lambda now=None: "2099-01-01"  # siguiente día operativo: vuelve a operar
+    config.PROP_DAILY_LOSS_LIMIT_USD = 1000.0
+    sim.fail = True  # y un broker que rechaza tres veces seguidas lo detiene hasta mañana
+    assert [await cycle() for _ in range(3)] == ["orden rechazada (RuntimeError)"] * 3
+    sim.fail = False
+    assert await cycle() == "bloqueado: 3 órdenes fallidas seguidas" and not trade_logger.open_trades()
+    risk.session, risk.trading_day = real_session, real_day
+    logging.getLogger().removeHandler(cap)
+
+
 if __name__ == "__main__":
     check_cache()
     check_risk()
@@ -638,5 +941,6 @@ if __name__ == "__main__":
     asyncio.run(check_macro())
     check_optimizer()
     asyncio.run(check_backtest())
+    asyncio.run(check_topstepx())
     print("selfcheck OK: caché, riesgo y costes, 5 agentes, jefe, ciclo completo de operación, evolución "
-          "(muerte, mutación, persistencia), tokens, alertas, broker CCXT, macro, optimizador y backtest")
+          "(muerte, mutación, persistencia), tokens, alertas, broker CCXT, macro, optimizador, backtest y TopstepX (API falsa local, kill switch, sesión y frecuencia)")

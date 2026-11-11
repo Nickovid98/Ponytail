@@ -90,6 +90,13 @@ def last_close_ts(symbol: str) -> float:
              (symbol, config.EXECUTION_MODE))[0][0]
 
 
+def entries_since(ts: float) -> list[float]:
+    """Momentos de apertura de las operaciones iniciadas desde `ts`, abiertas o cerradas."""
+    _trades("LIMIT 0")
+    return [r[0] for r in q("SELECT opened_ts FROM trades WHERE opened_ts>=? AND mode=? ORDER BY opened_ts",
+                            (ts, config.EXECUTION_MODE))]
+
+
 # --- Árbol genealógico de agentes -------------------------------------------
 def _versions(tail: str, params: tuple = ()) -> list[dict]:
     return _select(_A, "agent_versions", tail, params, ("rules",))

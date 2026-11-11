@@ -120,8 +120,8 @@ class EvolutionManager:
     # --- Muerte -------------------------------------------------------------
     def on_trade_closed(self, t: dict) -> None:
         """Mata a los agentes que recomendaron una operación perdedora (PnL ya neto)."""
-        if t["exit_reason"] in ("KILL", "LIMITE"):
-            return  # la cerró el operador o un límite de riesgo, no el mercado
+        if t["exit_reason"] in ("KILL", "LIMITE", "SESION"):
+            return  # la cerró el operador, un límite de riesgo o el fin de sesión, no el mercado
         if not (t["pnl"] < 0 or t["exit_reason"].startswith("SL")):
             return
         cause = (f"{t['exit_reason']} en {t['symbol']} {t['side']}: PnL neto {t['pnl']:+.2f} "

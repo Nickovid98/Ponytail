@@ -15,7 +15,7 @@ def _s(key: str, default: str = "") -> str:
 
 
 def _f(key: str, default: float) -> float:
-    return float(os.getenv(key, default))
+    return float(_s(key) or default)  # una variable vacía (PROP_...= en la plantilla) vale lo que no ponerla
 
 
 def _on(key: str) -> bool:
@@ -29,6 +29,9 @@ PAPER_TRADING = _on("PAPER_TRADING")  # True: precios reales, órdenes simuladas
 EXCHANGE_SANDBOX = _on("EXCHANGE_SANDBOX")  # con PAPER_TRADING=False: testnet/demo del exchange
 # paper | sandbox | live. "live" es dinero real y exige CONFIRM_LIVE (ver abajo).
 EXECUTION_MODE = "paper" if PAPER_TRADING else "sandbox" if EXCHANGE_SANDBOX else "live"
+BROKER = _s("BROKER", "ccxt").lower()  # ccxt (cripto) | topstepx (futuros en Topstep, API de ProjectX)
+if BROKER == "topstepx" and not PAPER_TRADING:
+    EXECUTION_MODE = "live"  # una cuenta de evaluación se pierde como una real: exige CONFIRM_LIVE
 EXCHANGE_ID = _s("EXCHANGE_ID", "binanceusdm")
 SANDBOX_KIND = _s("SANDBOX_KIND", "auto").lower()  # auto | testnet | demo
 EXCHANGE_API_KEY = _s("EXCHANGE_API_KEY")
@@ -50,10 +53,28 @@ MAX_LEVERAGE = _f("MAX_LEVERAGE", 3)
 MAX_OPEN_POSITIONS = int(_f("MAX_OPEN_POSITIONS", 2))
 MIN_NOTIONAL = _f("MIN_NOTIONAL", 10)
 DAILY_LOSS_LIMIT_PCT = _f("DAILY_LOSS_LIMIT_PCT", 3.0)
-TOTAL_LOSS_LIMIT_USD = _f("TOTAL_LOSS_LIMIT_USD", 500)
+TOTAL_LOSS_LIMIT_USD = _f("TOTAL_LOSS_LIMIT_USD", 0 if BROKER == "topstepx" else 500)  # 0 = sin límite total
 COOLDOWN_S = _f("COOLDOWN_S", 900)  # espera tras un cierre antes de reentrar al mismo activo
 FEE_PCT = _f("FEE_PCT", 0.075)  # comisión por lado, en % del nocional
 SLIPPAGE_PCT = _f("SLIPPAGE_PCT", 0.02)  # deslizamiento proyectado por orden a mercado, en %
+
+# --- Topstep / prop firm (solo con BROKER=topstepx) -------------------------
+TOPSTEPX_API_URL = _s("TOPSTEPX_API_URL", "https://api.topstepx.com")
+TOPSTEPX_USERNAME = _s("TOPSTEPX_USERNAME")
+TOPSTEPX_API_KEY = _s("TOPSTEPX_API_KEY")
+TOPSTEPX_ACCOUNT_ID = _s("TOPSTEPX_ACCOUNT_ID")
+PROP_DAILY_LOSS_LIMIT_USD = _f("PROP_DAILY_LOSS_LIMIT_USD", 0)  # el de TU cuenta; obligatorio
+PROP_ACCOUNT_FLOOR_USD = _f("PROP_ACCOUNT_FLOOR_USD", 0)  # saldo en el que se pierde la cuenta (Max Loss Limit)
+PROP_KILL_AT_PCT = min(_f("PROP_KILL_AT_PCT", 75), 80.0)  # el kill switch salta al 75 % del límite; techo 80
+PROP_MAX_CONTRACTS = int(_f("PROP_MAX_CONTRACTS", 1))
+PROP_COMMISSION = _f("PROP_COMMISSION_PER_CONTRACT", 1.5)  # estimación por contrato y lado, en USD
+PROP_SLIPPAGE_TICKS = _f("PROP_SLIPPAGE_TICKS", 1)
+PROP_LAST_ENTRY_CT = _s("PROP_LAST_ENTRY_CT", "14:30")  # hora de Chicago: sin entradas nuevas desde aquí
+PROP_FLAT_BY_CT = _s("PROP_FLAT_BY_CT", "15:00")  # hora de Chicago: todo cerrado desde aquí
+PROP_BRACKET_SIGNED = _s("PROP_BRACKET_SIGNED", "true").lower() not in _FALSE  # ticks de los brackets con signo
+PROP_VERIFY_WAIT_S = _f("PROP_VERIFY_WAIT_S", 1.0)
+MAX_TRADES_PER_DAY = int(_f("MAX_TRADES_PER_DAY", 10 if BROKER == "topstepx" else 0))  # 0 = sin tope
+MIN_ORDER_GAP_S = _f("MIN_ORDER_GAP_S", 60 if BROKER == "topstepx" else 0)  # espera entre entradas
 
 # --- Decisión --------------------------------------------------------------
 DECISION_THRESHOLD = _f("DECISION_THRESHOLD", 0.25)  # sobre un score en [-1, 1]
@@ -93,9 +114,18 @@ DISCORD_WEBHOOK_URL = _s("DISCORD_WEBHOOK_URL")
 # --- Almacenamiento --------------------------------------------------------
 DB_PATH = Path(_s("DB_PATH", str(ROOT / "trades_history.db")))
 CACHE_DIR = Path(_s("CACHE_DIR", str(ROOT / "data" / "cache")))
+LOG_FILE = Path(_s("LOG_FILE", str(ROOT / "trading.log")))
+
+if BROKER == "topstepx":
+    if PROP_DAILY_LOSS_LIMIT_USD <= 0:
+        raise SystemExit("BROKER=topstepx exige PROP_DAILY_LOSS_LIMIT_USD: el límite de pérdida diaria de tu cuenta,\n"
+                         "tal como aparece en Topstep. No se asume ningún valor.")
+    # En futuros los costes son por contrato y los aplica el broker; el tamaño lo acota PROP_MAX_CONTRACTS.
+    FEE_PCT = SLIPPAGE_PCT = MIN_NOTIONAL = 0.0
+    MAX_LEVERAGE = 1e9
 
 if EXECUTION_MODE == "live" and _s("CONFIRM_LIVE") != "SI_ARRIESGO_DINERO_REAL":
     raise SystemExit(
-        "PAPER_TRADING=False y EXCHANGE_SANDBOX=False operan con dinero real. Para confirmarlo,\n"
+        "Esta configuración envía órdenes reales (dinero real o una cuenta de evaluación). Para confirmarlo,\n"
         "añade al .env:  CONFIRM_LIVE=SI_ARRIESGO_DINERO_REAL"
     )
