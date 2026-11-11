@@ -187,7 +187,29 @@ cuentan en el denominador, así que hace falta acuerdo amplio. Opera si
 Los pesos de cada agente salen de su historial de aciertos (`optimizer.py`, una
 vez por semana, o `python optimizer.py --dry-run`).
 
+## Backtest (`backtest.py`)
+
+```bash
+python backtest.py --days 30                  # descarga las velas, las guarda y simula
+python backtest.py --days 30 --evolution      # con la selección natural activada
+python backtest.py --days 60 --threshold 0.35 --rr 1.5 --sl-mult 2
+```
+
+Reproduce el motor vela a vela con las mismas piezas que en vivo (agentes,
+decisión del jefe, stop, tamaño, comisiones y deslizamiento) y sin mirar nunca
+una vela que aún no ha cerrado. Devuelve operaciones, win rate, PnL neto,
+profit factor, caída máxima, costes y la precisión de cada agente. Úsalo para
+comparar configuraciones entre sí, y con `--evolution` para ver si la selección
+natural mejora o empeora el resultado.
+
+No reproduce el agente macro (no hay titulares históricos), el libro de órdenes,
+los pesos del optimizador ni los post-mortem con Claude.
+
 ## Dashboard
+
+El panel solo escucha en `localhost` (`.streamlit/config.toml`): tiene el kill
+switch y el botón de aprobar órdenes y no pide contraseña.
+
 
 - **Modo activo** en la cabecera: `PAPER TRADING ACTIVO`, `SANDBOX DEL EXCHANGE`
   o `REAL TRADING`.
@@ -228,6 +250,8 @@ vez por semana, o `python optimizer.py --dry-run`).
 
 ```
 main.py                  orquestador asyncio (--once para un solo ciclo)
+backtest.py              simulación sobre velas históricas
+CLAUDE.md                guía breve para sesiones de Claude Code
 dashboard.py             panel Streamlit
 optimizer.py             métricas y pesos por historial de aciertos
 selfcheck.py             comprobación de extremo a extremo

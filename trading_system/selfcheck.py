@@ -9,6 +9,7 @@ import datetime as dt
 import json
 import logging
 import os
+import pathlib
 import subprocess
 import sys
 import tempfile
@@ -29,6 +30,7 @@ os.environ.update(
 import numpy as np
 import pandas as pd
 
+import backtest
 import config
 import optimizer
 from agents import AGENT_LABELS, Signal
@@ -563,6 +565,58 @@ def check_optimizer():
     assert db.get_state("optimizer:report")["agents"]["malo"]["X/USDT"]["precision"] == 0.0
 
 
+async def check_backtest():
+    # 74 días de velas de 5m en tendencia alcista y sus agregados; se simulan los 4 últimos.
+    n, r = 74 * 288, np.random.default_rng(11)
+    c = 100 * np.exp(np.cumsum(0.0002 + r.normal(0, 0.002, n)))
+    o = np.r_[c[0], c[:-1]]
+    m5 = pd.DataFrame({"ts": pd.date_range("2026-03-01", periods=n, freq="5min", tz="UTC"), "open": o,
+                       "high": np.maximum(o, c) * 1.0005, "low": np.minimum(o, c) * 0.9995, "close": c, "volume": 1.0})
+    agg = lambda rule: m5.set_index("ts").resample(rule, label="left", closed="left").agg(
+        {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna().reset_index()
+    data = {SYM: {"5m": m5, "15m": agg("15min"), "1h": agg("1h"), "4h": agg("4h"), "1d": agg("1D")}}
+
+    hm = backtest.HistoryMarket(data)  # nunca entrega una vela que aún no ha cerrado
+    hm.now = pd.Timestamp("2026-05-01 10:07", tz="UTC")
+    for tf in ("5m", "15m", "1h", "4h", "1d"):
+        last = (await hm.ohlcv(SYM, tf, 5)).ts.iloc[-1]
+        assert last + pd.Timedelta(seconds=backtest.seconds(tf)) <= hm.now < last + 2 * pd.Timedelta(seconds=backtest.seconds(tf)), tf
+
+    config.COOLDOWN_S = 900
+    res = await backtest.run(data, 4)
+    again = await backtest.run(data, 4)
+    m = res["metrics"]
+    assert m["n"] >= 3 and res["trades"][0]["side"] == "LONG", m  # tendencia alcista: opera, y en largo
+    assert [t["pnl"] for t in res["trades"]] == [t["pnl"] for t in again["trades"]]  # determinista
+    assert abs(res["equity"] - (config.CAPITAL + m["pnl"])) < 1e-6 and res["max_drawdown_pct"] <= 0
+    for t in res["trades"]:
+        assert t["fees"] > 0 and t["slippage"] >= 0  # toda operación paga costes
+        if t["exit_reason"] == "SL":  # la pérdida neta por stop es el 1 % del capital de ese momento
+            assert 0.009 * t["equity_at_entry"] < -t["pnl"] < 0.0105 * t["equity_at_entry"], t["pnl"]
+    assert "Operaciones" in backtest.report(res, 4, False)
+    evo = await backtest.run(data, 4, evolution=True)
+    assert evo["versions"]["smc"].startswith("SMC_Scalper_v") and evo["metrics"]["n"] >= 1
+
+    class Ex:  # el descargador pagina de 1000 en 1000 y no deja huecos ni duplicados
+        def milliseconds(self):
+            return 1_780_000_000_000
+
+        async def fetch_ohlcv(self, symbol, tf, since=None, limit=1000):
+            step = backtest.seconds(tf) * 1000
+            first = -(-since // step) * step
+            return [[t, 1, 2, 0.5, 1.5, 9] for t in range(first, min(first + limit * step, self.milliseconds()), step)]
+
+    got = await backtest.download(Ex(), SYM, 5, pathlib.Path(TMP) / "velas")
+    d5 = got["5m"].ts.diff().dropna()
+    assert len(got["5m"]) >= 5 * 288 + backtest.WARMUP - 1 and (d5 == pd.Timedelta(minutes=5)).all()
+
+    class Offline(Ex):  # la segunda vez sale del CSV: no vuelve a pedir nada al exchange
+        async def fetch_ohlcv(self, *a, **kw):
+            raise AssertionError("no debía descargar")
+
+    assert len((await backtest.download(Offline(), SYM, 5, pathlib.Path(TMP) / "velas"))["5m"]) == len(got["5m"])
+
+
 def check_cache():
     cache_manager.cache_set("k", {"a": 1}, 0.05)  # diskcache: persistente y con caducidad
     assert cache_manager.cache_get("k") == {"a": 1}
@@ -583,5 +637,6 @@ if __name__ == "__main__":
     asyncio.run(check_ccxt_broker())
     asyncio.run(check_macro())
     check_optimizer()
+    asyncio.run(check_backtest())
     print("selfcheck OK: caché, riesgo y costes, 5 agentes, jefe, ciclo completo de operación, evolución "
-          "(muerte, mutación, persistencia), tokens, alertas, broker CCXT, macro y optimizador")
+          "(muerte, mutación, persistencia), tokens, alertas, broker CCXT, macro, optimizador y backtest")

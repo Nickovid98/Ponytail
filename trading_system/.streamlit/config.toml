@@ -1,0 +1,8 @@
+# El panel tiene el kill switch y el botón de aprobar órdenes y no pide contraseña:
+# por defecto solo escucha en este equipo. Para verlo desde otro dispositivo, usa un
+# túnel SSH o una VPN antes que cambiar esta dirección.
+[server]
+address = "localhost"
+
+[browser]
+gatherUsageStats = false

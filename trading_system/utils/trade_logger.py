@@ -79,12 +79,15 @@ def closed_trades(since: float = 0.0, mode: str | None = None) -> list[dict]:
 
 
 def realized_pnl() -> float:
-    return sum(t["pnl"] for t in closed_trades(mode=config.EXECUTION_MODE))
+    _trades("LIMIT 0")  # el jefe lo pide en cada ciclo: se suma en SQL, sin cargar las operaciones
+    return q("SELECT COALESCE(SUM(pnl),0) FROM trades WHERE closed_ts IS NOT NULL AND mode=?",
+             (config.EXECUTION_MODE,))[0][0]
 
 
 def last_close_ts(symbol: str) -> float:
-    return max((t["closed_ts"] for t in closed_trades(mode=config.EXECUTION_MODE) if t["symbol"] == symbol),
-               default=0.0)
+    _trades("LIMIT 0")
+    return q("SELECT COALESCE(MAX(closed_ts),0) FROM trades WHERE symbol=? AND mode=?",
+             (symbol, config.EXECUTION_MODE))[0][0]
 
 
 # --- Árbol genealógico de agentes -------------------------------------------
