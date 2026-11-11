@@ -30,7 +30,10 @@ dependen. Nada de lo siguiente está instalado:
   Brokers, en paper por defecto y solo tras tu "sí" para cada orden.
 - **`free-llm-apis`**: nada. Es una guía para conseguir claves gratuitas de
   proveedores de LLM.
-- **`agent-reach`**: el programa `agent-reach` (`pip install agent-reach`). Lee
+- **`agent-reach`**: el programa `agent-reach`, instalado con `uv` desde GitHub:
+  `uv tool install https://github.com/Panniantong/Agent-Reach/releases/latest/download/agent-reach.zip`
+  y después `agent-reach setup`. **No uses `pip install agent-reach`**: el paquete
+  de ese nombre en PyPI no es este proyecto, según avisa su propio autor. Lee
   contenido de X, Reddit, YouTube y otras plataformas; algunas piden que
   inicies sesión tú. `SKILL.md` está en chino y `SKILL_en.md` en inglés.
 - **`ai-image-creator`**: `uv` y una clave de OpenRouter.
@@ -62,7 +65,10 @@ dependen. Nada de lo siguiente está instalado:
 
   Antes de hacerlo en este proyecto, ten en cuenta que registra las entradas y
   salidas de las herramientas: si alguna vez Claude lee tu `.env`, las claves
-  del exchange quedarían en su base de datos local.
+  del exchange quedarían en su base de datos local. Además, el instalador
+  alternativo (`npx claude-mem install`) pide iniciar sesión y ofrece un
+  "observer" con 30 días de prueba que exige un método de pago, y la telemetría
+  anónima viene activada (`npx claude-mem telemetry disable` la apaga).
 - **El resto de my-claude-code-setup**: plantillas de `CLAUDE.md`, comandos,
   subagentes, hooks y `settings.json`. No son skills, y los hooks y ajustes
   cambiarían el comportamiento de Claude Code en este repositorio.
