@@ -4,6 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+import config
+
 Direction = Literal["LONG", "SHORT", "NEUTRAL"]
 
 AGENT_LABELS = {
@@ -13,6 +15,8 @@ AGENT_LABELS = {
     "wyckoff": "4 · Wyckoff y Perfil de Volumen",
     "sentiment": "5 · Tendencia y Sentimiento",
 }
+if config.STRATEGY == "orb":  # con esta estrategia opera un único agente
+    AGENT_LABELS = {"orb": "Ruptura del rango de apertura"}
 
 
 class Signal(BaseModel):

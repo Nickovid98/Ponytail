@@ -20,7 +20,7 @@ import anthropic
 from pydantic import BaseModel
 
 import config
-from agents import Signal
+from agents import AGENT_LABELS, Signal
 from utils import db, token_budget, trade_logger
 
 log = logging.getLogger("evolution")
@@ -36,7 +36,10 @@ LINEAGE = {
                 "niveles del perfil de volumen (POC, HVN, área de valor) para sesgo de medio plazo."),
     "sentiment": ("Trend_Sentiment", "Mide impulso y tendencia con EMA, MACD y RSI en 4H y 1D, más el "
                   "desequilibrio del libro de órdenes como proxy de order flow."),
+    "orb": ("ORB_Breakout", "Opera la ruptura del rango de apertura: entra en la primera vela que cierra fuera "
+            "del rango de los primeros minutos de la sesión, con stop en el punto medio del rango."),
 }
+LINEAGE = {a: v for a, v in LINEAGE.items() if a in AGENT_LABELS}  # solo los agentes de la estrategia activa
 
 POST_MORTEM = """Eres el gestor de evolución de una mesa de trading algorítmico. Un sub-agente acaba de \
 morir: o su código falló, o recomendó una operación que perdió dinero después de comisiones y deslizamiento.

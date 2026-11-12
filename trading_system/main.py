@@ -17,6 +17,7 @@ from agents import macro_agent
 from agents.boss_agent import BossAgent
 from agents.evolution_manager import EvolutionManager
 from agents.historian_agent import HistorianAgent
+from agents.orb_agent import ORBAgent
 from agents.macro_agent import MacroAgent
 from agents.sentiment_agent import SentimentAgent
 from agents.smc_agent import SMCAgent
@@ -90,8 +91,11 @@ async def main(once: bool = False) -> None:
         # Carga de SQLite la versión más alta de cada agente, con sus reglas.
         evo = EvolutionManager(notify=notifier.send, base_prompts={"macro": macro_agent.SYSTEM})
         broker = make_broker(market)
-        agents = [HistorianAgent(), MacroAgent(system=lambda: evo.instructions("macro")), SMCAgent(),
-                  WyckoffAgent(), SentimentAgent()]
+        if config.STRATEGY == "orb":
+            agents = [ORBAgent()]
+        else:
+            agents = [HistorianAgent(), MacroAgent(system=lambda: evo.instructions("macro")), SMCAgent(),
+                      WyckoffAgent(), SentimentAgent()]
         boss = BossAgent(market, broker, {a.name: 3 * a.interval + 60 for a in agents}, evo, notifier.send)
         log.info("%s en %s · %s · riesgo %.1f%%/op · comisión %.3f%% + deslizamiento %.3f%% por lado · Claude %s",
                  {"paper": "PAPER TRADING", "sandbox": "SANDBOX", "live": "REAL TRADING"}[config.EXECUTION_MODE],

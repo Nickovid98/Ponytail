@@ -28,6 +28,7 @@ Sistema de day trading multi-agente para cripto (CCXT) y futuros de Topstep (`BR
 
 - `agents/`: `Signal` (contrato), cinco agentes analíticos, `boss_agent.py` (decisión y ejecución), `evolution_manager.py` (muerte y renacimiento).
 - `utils/`: `risk_manager` (stop, tamaño, costes), `trade_logger` (operaciones y genealogía en SQLite), `token_budget`, `cache_manager`, `notifier`, `exchange` (PaperBroker y CcxtBroker), `topstepx` (cliente REST, datos y brokers de futuros), `alpha_vantage`, `db`.
+- `agents/orb_agent.py`: ruptura del rango de apertura (`STRATEGY=orb`); se entrena y examina con `backtest.py --walk-forward`.
 - `main.py` orquesta; `optimizer.py` ajusta pesos; `backtest.py` simula; `dashboard.py` muestra y controla.
 
 ## Skills útiles aquí (`.claude/skills/`)

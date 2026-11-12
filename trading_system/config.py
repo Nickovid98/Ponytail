@@ -77,8 +77,11 @@ MAX_TRADES_PER_DAY = int(_f("MAX_TRADES_PER_DAY", 10 if BROKER == "topstepx" els
 MIN_ORDER_GAP_S = _f("MIN_ORDER_GAP_S", 60 if BROKER == "topstepx" else 0)  # espera entre entradas
 
 # --- Decisión --------------------------------------------------------------
+STRATEGY = _s("STRATEGY", "ensemble").lower()  # ensemble: los cinco agentes · orb: ruptura del rango de apertura
+if STRATEGY not in ("ensemble", "orb"):
+    raise SystemExit(f"STRATEGY={STRATEGY!r} no existe: usa ensemble u orb")
 DECISION_THRESHOLD = _f("DECISION_THRESHOLD", 0.25)  # sobre un score en [-1, 1]
-MIN_AGENTS = int(_f("MIN_AGENTS", 3))  # agentes con señal vigente para poder operar
+MIN_AGENTS = int(_f("MIN_AGENTS", 1 if STRATEGY == "orb" else 3))  # agentes con señal vigente para poder operar
 APPROVAL_TTL_S = _f("APPROVAL_TTL_S", 120)  # validez de una aprobación manual
 
 # --- Evolución y tokens ----------------------------------------------------

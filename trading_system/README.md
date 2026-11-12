@@ -303,6 +303,36 @@ Cada bot solo aprende del pasado, así que el recorrido completo es una prueba
 honesta de si el aprendizaje sirve. Deja de serlo si se cambian las reglas y se
 repite hasta que el año salga bien: eso es memorizar el año.
 
+### Ruptura del rango de apertura con validación fuera de muestra (`STRATEGY=orb`)
+
+Con `STRATEGY=orb` opera un único agente, `agents/orb_agent.py`, con las reglas
+de las skills `trader-entry` y `trader-exit`: el rango es el máximo y el mínimo
+de los primeros minutos de la sesión, la entrada es la primera vela que CIERRA
+fuera de él (una mecha no cuenta), solo vale la primera ruptura del día y el
+stop va al punto medio del rango. Su genoma tiene cinco genes: minutos del
+rango, stop (punto medio o extremo opuesto), volumen mínimo de la ruptura,
+lados (solo largos o ambos) y objetivo en R.
+
+```bash
+STRATEGY=orb EXCHANGE_ID=yahoo SYMBOLS=NVDA,META,MSFT SMC_TIMEFRAME=1h ATR_TIMEFRAME=1h \
+CAPITAL=50000 RISK_PER_TRADE_PCT=0.4 TOTAL_LOSS_LIMIT_USD=0 PROP_DAILY_LOSS_LIMIT_USD=1000 \
+python backtest.py --walk-forward 180,60 --lineage 2000 --flat
+```
+
+`--walk-forward ENTRENA,EXAMINA` parte la historia en exámenes consecutivos.
+Para cada uno, la población entera de genomas opera los días de entrenamiento
+anteriores con reglas de cuenta fondeada; los que pierden la cuenta quedan
+eliminados, y de los supervivientes con ganancia se elige el mejor. Ese genoma,
+congelado, opera el examen, del que el entrenamiento no ha visto ni una vela. Si
+nadie sobrevive ganando, en ese examen no se opera. El informe compara lo que
+los elegidos ganaron entrenando con lo que hicieron en el examen: esa
+diferencia es lo memorizado.
+
+`EXCHANGE_ID=yahoo` lee acciones de Yahoo Finance sin clave: unos 3 años en
+velas de 1 hora, y solo los últimos 60 días en velas de 5 minutos. El motor en
+vivo no tiene todavía una fuente de precios de acciones: esta estrategia solo
+se puede simular.
+
 ## Dashboard
 
 El panel solo escucha en `localhost` (`.streamlit/config.toml`): tiene el kill

@@ -39,6 +39,8 @@ from agents import AGENT_LABELS, Signal
 from agents.boss_agent import BossAgent
 from agents.evolution_manager import EvolutionManager, Mutation
 from agents.historian_agent import HistorianAgent
+from agents.orb_agent import ORBAgent
+from agents import orb_agent
 from agents.macro_agent import MacroAgent, MacroOutput, Verdict, upcoming_event
 from agents.sentiment_agent import SentimentAgent
 from agents.smc_agent import SMCAgent
@@ -545,6 +547,38 @@ async def check_macro():
     config.DAILY_TOKEN_BUDGET = 200_000
 
 
+def check_orb():
+    """Ruptura del rango de apertura: las reglas de la skill trader-entry, vela a vela."""
+    def frame(rows):  # tres velas de ayer, el hueco de la noche y la sesión de hoy en velas de 5 minutos
+        t0 = pd.Timestamp("2026-06-01 13:30", tz="UTC")
+        bars = [(t0 - pd.Timedelta(days=1) + pd.Timedelta(minutes=5 * i), 100, 100.5, 99.5, 100, 10) for i in range(3)]
+        bars += [(t0 + pd.Timedelta(minutes=5 * i), *r) for i, r in enumerate(rows)]
+        return pd.DataFrame(bars, columns=["ts", "open", "high", "low", "close", "volume"])
+
+    rng = [(100, 101, 99.5, 100.5, 10), (100.5, 100.8, 99, 100, 10), (100, 100.9, 99.6, 100.4, 10)]  # rango 99-101
+    A = lambda rows, **genes: ORBAgent.analyze(SYM, frame(rng + rows), orb_agent.DEFAULT | genes, 300)
+    wick, level = (100.4, 102, 100.2, 100.9, 30), (100.4, 101.2, 100.2, 101.0, 30)
+    up, down, inside = (100.9, 101.5, 100.8, 101.2, 30), (99.5, 99.6, 98, 98.5, 30), (100.2, 100.6, 100, 100.3, 10)
+    assert "formación" in A([]).rationale and A([inside]).direction == "NEUTRAL"
+    assert A([wick]).direction == "NEUTRAL" and A([level]).direction == "NEUTRAL"  # ni una mecha ni un cierre en el nivel
+    s = A([wick, up])
+    assert s.direction == "LONG" and s.support == 100.0 and s.confidence >= 60 and s.features["volx"] == 3.0, s
+    assert A([up], stop="low").support == 99.0  # el stop puede ir al extremo opuesto del rango
+    assert A([up, (101.2, 102, 101, 101.8, 30)]).direction == "NEUTRAL"  # una vela después ya es tarde
+    assert A([down]).direction == "NEUTRAL"  # la skill solo opera largos
+    s = A([down], sides="both")
+    assert s.direction == "SHORT" and s.resistance == 100.0 and A([down], sides="both", stop="low").resistance == 101.0
+    assert A([up, inside, down], sides="both").direction == "NEUTRAL"  # solo cuenta la primera ruptura del día
+    assert A([(100.9, 101.5, 100.8, 101.2, 10)], vol_x=1.5).direction == "NEUTRAL" and A([up], vol_x=1.5).direction == "LONG"
+    assert A([inside] * 3, or_min=30).rationale.startswith("rango") and A([inside] * 3 + [up], or_min=30).direction == "LONG"
+    nonstop = frame(rng + [up])
+    nonstop["ts"] = pd.date_range("2026-06-01", periods=len(nonstop), freq="5min", tz="UTC")
+    assert "continuo" in ORBAgent.analyze(SYM, nonstop, orb_agent.DEFAULT, 300).rationale  # cripto: no hay apertura
+    assert len(orb_agent.genomes(300)) == 72 and {g["or_min"] for g in orb_agent.genomes(3600)} == {60}
+    plan = risk.build_plan("LONG", 101.2, 1.0, 3550, structure=100.0)  # stop bajo el punto medio, con 0,2 ATR de margen
+    assert abs(plan["sl"] - 99.8) < 1e-9 and abs(plan["tp"] - (101.2 + 2 * 1.4)) < 1e-9, plan
+
+
 def check_optimizer():
     m = optimizer.metrics([{"pnl": p, "entry": 100, "qty": 1} for p in (10, 10, -5, -5, 20)])
     assert m["n"] == 5 and m["win_rate"] == 0.6 and m["profit_factor"] == 4.0 and m["sharpe"] > 0, m
@@ -652,6 +686,36 @@ async def check_backtest():
         assert t["opened"].date() == t["closed"].date() and 14 <= t["opened"].hour and t["opened"].strftime("%H:%M") <= "19:30", t
     assert {t["exit_reason"] for t in day["trades"]} <= {"SL", "TP", "SESION", "LIMITE"}
     assert any(t["exit_reason"] == "SESION" for t in day["trades"])
+
+    # ORB entrenado en un periodo y examinado en el siguiente, que el entrenamiento no ve.
+    config.STRATEGY, config.MIN_AGENTS = "orb", 1
+    try:
+        pop = [orb_agent.DEFAULT | {"or_min": m, "sides": side} for m, side in ((15, "long"), (30, "long"), (15, "both"))]
+        rules, rr = {"max_loss": 1e9, "flat": True, "min_trades": 3}, config.REWARD_RISK
+        end = s5.ts.iloc[-1] + pd.Timedelta(minutes=5)
+        f = await backtest.fold(sdata, end, 20, 10, rules, pop)
+        assert f["best"] and f["population"] == 3 and f["train"][1] == f["test"][0] == end - pd.Timedelta(days=10)
+        assert f["n"] == len(f["trades"]) > 0 and abs(sum(f["weekly"]) - f["net"]) < 1e-6 and config.REWARD_RISK == rr
+        assert all(f["test"][0] <= t["opened"] and t["closed"] <= f["test"][1] for t in f["trades"])  # solo en su periodo
+        # Sin fugas: si los precios del examen fueran otros, el entrenamiento elegiría exactamente lo mismo.
+        px = ["open", "high", "low", "close"]
+        other = {SYM: {tf: df.assign(**{c: np.where(df.ts >= f["test"][0], df[c] * 3, df[c]) for c in px})
+                       for tf, df in sdata[SYM].items()}}
+        g = await backtest.fold(other, end, 20, 10, rules, pop)
+        assert g["best"] == f["best"] and g["net"] != f["net"]
+        # Selección natural: quien pierde la cuenta entrenando queda eliminado; sin supervivientes no se opera.
+        none = await backtest.fold(sdata, end, 20, 10, rules | {"max_loss": 1}, pop)
+        assert none["best"] is None and none["dead"] >= 1 and none["n"] == 0 and none["net"] == 0
+        wf = await backtest.walk_forward(sdata, 20, 10, rules, pop)
+        assert len(wf) == 4 and all(a["test"][1] == b["test"][0] for a, b in zip(wf, wf[1:]))  # exámenes consecutivos
+        assert wf[-1]["net"] == f["net"] and wf[-1]["best"] == f["best"]
+        assert "fuera de muestra" in backtest.report_wf(wf)
+    finally:
+        config.STRATEGY, config.MIN_AGENTS = "ensemble", 3
+
+    chart = {"chart": {"result": [{"timestamp": [1780000200, 1780003800, 1780007400], "indicators": {"quote": [
+        {"open": [1, None, 3], "high": [2, 2, 4], "low": [0.5, 1, 2], "close": [1.5, 2, 3.5], "volume": [10, 5, 0]}]}}]}}
+    assert backtest.yahoo_frame(chart).close.tolist() == [1.5]  # fuera las velas incompletas y las de volumen cero
 
     class Ex:  # el descargador pagina de 1000 en 1000 y no deja huecos ni duplicados
         def milliseconds(self):
@@ -1026,8 +1090,9 @@ if __name__ == "__main__":
     asyncio.run(check_ccxt_broker())
     asyncio.run(check_macro())
     check_optimizer()
+    check_orb()
     asyncio.run(check_backtest())
     asyncio.run(check_alpaca())
     asyncio.run(check_topstepx())
     print("selfcheck OK: caché, riesgo y costes, 5 agentes, jefe, ciclo completo de operación, evolución "
-          "(muerte, mutación, persistencia), tokens, alertas, broker CCXT, macro, optimizador, backtest, datos de Alpaca y TopstepX (API falsa local, kill switch, sesión y frecuencia)")
+          "(muerte, mutación, persistencia), tokens, alertas, broker CCXT, macro, optimizador, ORB, backtest con validación fuera de muestra, datos de Alpaca y TopstepX (API falsa local, kill switch, sesión y frecuencia)")

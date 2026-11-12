@@ -14,8 +14,11 @@ Claude (la evolución usa siempre la mutación fija).
 """
 import argparse
 import asyncio
+import json
+import math
 import os
 import tempfile
+import urllib.request
 
 if __name__ == "__main__":  # la simulación nunca toca la base de datos del motor
     os.environ.update(DB_PATH=os.path.join(tempfile.mkdtemp(prefix="backtest_"), "bt.db"), PAPER_TRADING="true")
@@ -27,6 +30,7 @@ import config
 import optimizer
 from agents.boss_agent import BossAgent
 from agents.historian_agent import HistorianAgent
+from agents.orb_agent import ORBAgent, genomes
 from agents.sentiment_agent import SentimentAgent
 from agents.smc_agent import SMCAgent
 from agents.wyckoff_agent import WyckoffAgent
@@ -65,6 +69,41 @@ async def download(ex, symbol: str, days: int, cache_dir) -> dict[str, pd.DataFr
         df["ts"] = pd.to_datetime(df.ts, unit="ms", utc=True)
         df.sort_values("ts").to_csv(path, index=False)
         out[tf] = df.sort_values("ts").reset_index(drop=True)
+    return out
+
+
+def resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
+    return df.set_index("ts").resample(rule, label="left", closed="left").agg(
+        {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna().reset_index()
+
+
+def yahoo_frame(chart: dict) -> pd.DataFrame:
+    r = chart["chart"]["result"][0]
+    q = r["indicators"]["quote"][0]
+    df = pd.DataFrame({"ts": pd.to_datetime(r["timestamp"], unit="s", utc=True),
+                       **{k: q[k] for k in ("open", "high", "low", "close", "volume")}}).dropna()
+    return df[df.volume > 0].drop_duplicates("ts").sort_values("ts").reset_index(drop=True)
+
+
+def yahoo(symbol: str, cache_dir) -> dict[str, pd.DataFrame]:
+    """Velas de acciones de Yahoo Finance, gratis y sin clave (EXCHANGE_ID=yahoo): 2 años en 1h y
+    5 en 1d. Con SMC_TIMEFRAME=5m añade las de 5m, de las que Yahoo solo da los últimos 60 días."""
+    def get(interval: str, span: str) -> pd.DataFrame:
+        path = cache_dir / f"yahoo_{symbol}_{interval}_{pd.Timestamp.now('UTC'):%Y%m%d}.json"
+        if not path.exists():
+            req = urllib.request.Request(
+                f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval={interval}&range={span}",
+                headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                path.write_bytes(r.read())
+        return yahoo_frame(json.loads(path.read_text()))
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    h1 = get("1h", "730d")
+    out = {"1h": h1, "4h": resample(h1, "4h"), "1d": get("1d", "5y")}
+    if config.SMC_TIMEFRAME != "1h":
+        m5 = get("5m", "60d")
+        out |= {"5m": m5, "15m": resample(m5, "15min")}
     return out
 
 
@@ -130,23 +169,29 @@ def _generation(bot: dict, mine: list[dict], when, dead: bool) -> dict:
 
 
 async def run(data: dict, days: float, evolution: bool = False, quiet: bool = True,
-              lineage: dict | None = None) -> dict:
+              lineage: dict | None = None, genes: dict | None = None) -> dict:
     """lineage = {"max_loss": USD, "flat": bool, "learn": bool, "blocked": [(activo, lado)]} activa las reglas
     de cuenta fondeada: el bot muere al caer `max_loss` bajo su mejor cierre diario (el suelo deja de subir
     al llegar al capital inicial) y nace un sucesor con capital nuevo. `flat` cierra todo al acabar la sesión."""
-    saved = config.DECISION_THRESHOLD, config.ATR_TIMEFRAME, config.RISK_PER_TRADE_PCT
+    saved = config.DECISION_THRESHOLD, config.ATR_TIMEFRAME, config.RISK_PER_TRADE_PCT, config.REWARD_RISK
     try:
-        return await _run(data, days, evolution, quiet, lineage or {})
-    finally:  # el sucesor ajusta la configuración global: no debe salir de la simulación
-        config.DECISION_THRESHOLD, config.ATR_TIMEFRAME, config.RISK_PER_TRADE_PCT = saved
+        if genes and "rr" in genes:  # con STRATEGY=orb, `genes` es el genoma del agente
+            config.REWARD_RISK = genes["rr"]
+        return await _run(data, days, evolution, quiet, lineage or {}, genes)
+    finally:  # el sucesor y el genoma ajustan la configuración global: no debe salir de la simulación
+        config.DECISION_THRESHOLD, config.ATR_TIMEFRAME, config.RISK_PER_TRADE_PCT, config.REWARD_RISK = saved
 
 
-async def _run(data: dict, days: float, evolution: bool, quiet: bool, fl: dict) -> dict:
+async def _run(data: dict, days: float, evolution: bool, quiet: bool, fl: dict, genes: dict | None = None) -> dict:
     market = HistoryMarket(data)
-    agents = [HistorianAgent(), SMCAgent(), WyckoffAgent(), SentimentAgent()]
+    if config.STRATEGY == "orb":
+        agents = [ORBAgent(genes)]
+    else:
+        agents = [HistorianAgent(), SMCAgent(), WyckoffAgent(), SentimentAgent()]
     step = seconds(config.SMC_TIMEFRAME)
     slow_every = max(1, SLOW_S // step)
-    max_age = {a.name: 2.5 * (step if a.name == "smc" else slow_every * step) for a in agents}
+    fast = lambda a: a.name == "smc" or getattr(a, "every_bar", False)
+    max_age = {a.name: 2.5 * (step if fast(a) else slow_every * step) for a in agents}
     evo = None
     if evolution:
         from agents.evolution_manager import EvolutionManager
@@ -233,7 +278,7 @@ async def _run(data: dict, days: float, evolution: bool, quiet: bool, fl: dict) 
         # 3) Señales y entradas.
         for symbol in config.SYMBOLS:
             for a in agents:
-                if a.name != "smc" and i % slow_every:
+                if not fast(a) and i % slow_every:
                     continue
                 if evo and not evo.alive(a.name):
                     continue
@@ -283,6 +328,76 @@ async def _run(data: dict, days: float, evolution: bool, quiet: bool, fl: dict) 
     }
 
 
+MIN_TRAIN_TRADES = 30  # con menos operaciones en el entrenamiento, el resultado es ruido y no se elige
+
+
+def trim(data: dict, end) -> dict:
+    return {s: {tf: df[df.ts < end].reset_index(drop=True) for tf, df in tfs.items()} for s, tfs in data.items()}
+
+
+async def fold(data: dict, test_end, train_days: float, test_days: float, rules: dict,
+               population: list[dict] | None = None) -> dict:
+    """Un pliegue de la validación. ENTRENAMIENTO: cada genoma de la población opera el periodo anterior
+    al examen con las reglas de cuenta fondeada; los que pierden la cuenta quedan eliminados y entre los
+    supervivientes con ganancia se elige el mejor. EXAMEN: ese genoma, congelado, opera el periodo
+    siguiente, del que el entrenamiento no ha visto ni una vela. Si nadie sobrevive ganando, no se opera."""
+    rules = rules | {"learn": False}
+    test_start = test_end - pd.Timedelta(days=test_days)
+    train, pop = trim(data, test_start), []
+    for g in population or genomes(seconds(config.SMC_TIMEFRAME)):
+        r = await run(train, train_days, lineage=rules, genes=g)
+        pop.append({"genes": g, "net": r["lineage"]["net"], "n": r["metrics"]["n"],
+                    "deaths": len(r["lineage"]["generations"]) - 1})
+    alive = [p for p in pop if not p["deaths"] and p["net"] > 0 and p["n"] >= rules.get("min_trades", MIN_TRAIN_TRADES)]
+    best = max(alive, key=lambda p: p["net"], default=None)
+    out = {"train": (test_start - pd.Timedelta(days=train_days), test_start), "test": (test_start, test_end),
+           "population": len(pop), "dead": sum(bool(p["deaths"]) for p in pop), "survivors": len(alive), "best": best,
+           "net": 0.0, "n": 0, "deaths": 0, "weekly": [0.0] * math.ceil(test_days / 7), "trades": []}
+    if best:
+        r = await run(trim(data, test_end), test_days, lineage=rules, genes=best["genes"])
+        out |= {"net": r["lineage"]["net"], "n": r["metrics"]["n"], "deaths": len(r["lineage"]["generations"]) - 1,
+                "weekly": r["lineage"]["weekly"], "trades": r["trades"]}
+    return out
+
+
+def fold_ends(data: dict, train_days: float, test_days: float) -> list:
+    """Finales de los periodos de examen: consecutivos, sin solaparse, hasta la última vela."""
+    tf = config.SMC_TIMEFRAME
+    first = max(tfs[tf].ts.iloc[0] for tfs in data.values())
+    end = min(tfs[tf].ts.iloc[-1] for tfs in data.values()) + pd.Timedelta(seconds=seconds(tf))
+    # Margen para que el ATR tenga sus 100 velas antes del primer entrenamiento (en días de calendario de bolsa).
+    margin = math.ceil(100 * seconds(config.ATR_TIMEFRAME) / 23400 * 1.4) + 2
+    k = int(((end - first).days - train_days - margin) // test_days)
+    if k < 1:
+        raise SystemExit(f"No hay historia para entrenar {train_days:g} días y examinar {test_days:g}.")
+    return [end - pd.Timedelta(days=test_days * i) for i in range(k - 1, -1, -1)]
+
+
+async def walk_forward(data: dict, train_days: float, test_days: float, rules: dict,
+                       population: list[dict] | None = None) -> list[dict]:
+    return [await fold(data, e, train_days, test_days, rules, population) for e in fold_ends(data, train_days, test_days)]
+
+
+def report_wf(folds: list[dict]) -> str:
+    gene = lambda g: f"rango {g['or_min']} min, stop {g['stop']}, vol {g['vol_x']:g}x, {g['sides']}, {g['rr']:g}R"
+    lines = ["Validación fuera de muestra (walk-forward). Cada examen usa el genoma elegido SOLO con el periodo anterior."]
+    for f in folds:
+        b = f["best"]
+        chosen = f"{gene(b['genes'])} · entrenamiento {b['net']:+,.0f} en {b['n']} ops" if b else "ninguno ganó sin morir: no opera"
+        lines.append(f"  examen {f['test'][0]:%d-%m-%y} a {f['test'][1]:%d-%m-%y} · población {f['population']}, eliminados "
+                     f"{f['dead']}, aptos {f['survivors']} · {chosen} · EXAMEN {f['net']:+,.0f} en {f['n']} ops"
+                     + (f", {f['deaths']} cuentas perdidas" if f["deaths"] else ""))
+    w = np.array([x for f in folds for x in f["weekly"]])
+    promised = sum(f["best"]["net"] for f in folds if f["best"])
+    lines.append(f"Total fuera de muestra {sum(f['net'] for f in folds):+,.0f} en {sum(f['n'] for f in folds)} operaciones y "
+                 f"{len(w)} semanas · por semana: media {w.mean():+,.0f}, mediana {np.median(w):+,.0f} · semanas con 500 o más: "
+                 f"{(w >= 500).sum()} de {len(w)} · exámenes en positivo: {sum(f['net'] > 0 for f in folds)} de {len(folds)} "
+                 f"({sum(f['best'] is None for f in folds)} sin operar) · cuentas perdidas: {sum(f['deaths'] for f in folds)}")
+    lines.append(f"Los genomas elegidos sumaban {promised:+,.0f} en sus entrenamientos. La diferencia con el total de los "
+                 "exámenes es lo que el entrenamiento memorizó en vez de aprender.")
+    return "\n".join(lines)
+
+
 def report(res: dict, days: float, evolution: bool) -> str:
     m, fmt = res["metrics"], lambda x: "n/d" if x is None else f"{x:.2f}"
     lines = [f"Backtest de {days:g} días · {', '.join(config.SYMBOLS)} · {config.EXCHANGE_ID} · umbral {config.DECISION_THRESHOLD} · "
@@ -323,15 +438,27 @@ async def main() -> None:
     ap.add_argument("--lineage", type=float, metavar="USD", help="cuenta fondeada: al perder USD bajo su mejor cierre "
                     "diario el bot muere y nace un sucesor que hereda lo aprendido y corrige una causa")
     ap.add_argument("--flat", action="store_true", help="con --lineage: cierra todo al final de cada sesión")
+    ap.add_argument("--walk-forward", metavar="ENTRENA,EXAMINA", help="días de entrenamiento y de examen: elige el "
+                    "genoma ORB en cada periodo y lo examina en el siguiente (STRATEGY=orb)")
     a = ap.parse_args()
     for name, value in (("DECISION_THRESHOLD", a.threshold), ("REWARD_RISK", a.rr), ("ATR_SL_MULT", a.sl_mult)):
         if value is not None:
             setattr(config, name, value)
-    ex = make_exchange()
-    try:
-        data = {s: await download(ex, s, int(a.days), config.ROOT / "data" / "backtest") for s in config.SYMBOLS}
-    finally:
-        await ex.close()
+    cache_dir = config.ROOT / "data" / "backtest"
+    if config.EXCHANGE_ID == "yahoo":
+        data = {s: yahoo(s, cache_dir) for s in config.SYMBOLS}
+    else:
+        ex = make_exchange()
+        try:
+            data = {s: await download(ex, s, int(a.days), cache_dir) for s in config.SYMBOLS}
+        finally:
+            await ex.close()
+    if a.walk_forward:
+        if config.STRATEGY != "orb":
+            raise SystemExit("--walk-forward entrena genomas ORB: arranca con STRATEGY=orb")
+        train_days, test_days = map(float, a.walk_forward.split(","))
+        print(report_wf(await walk_forward(data, train_days, test_days, {"max_loss": a.lineage or 2000, "flat": a.flat})))
+        return
     lineage = {"max_loss": a.lineage, "flat": a.flat} if a.lineage else None
     print(report(await run(data, a.days, a.evolution, quiet=False, lineage=lineage), a.days, a.evolution))
 
