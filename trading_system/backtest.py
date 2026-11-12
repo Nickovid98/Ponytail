@@ -276,6 +276,7 @@ async def _run(data: dict, days: float, evolution: bool, quiet: bool, fl: dict, 
             continue
 
         # 3) Señales y entradas.
+        cands = []
         for symbol in config.SYMBOLS:
             for a in agents:
                 if not fast(a) and i % slow_every:
@@ -287,13 +288,18 @@ async def _run(data: dict, days: float, evolution: bool, quiet: bool, fl: dict, 
                 except Exception:
                     continue
                 signals[a.name, symbol] = evo.apply(sig) if evo else sig
-            if symbol in open_ or halted == day or len(open_) >= config.MAX_OPEN_POSITIONS \
-                    or ts - last_close.get(symbol, 0) < config.COOLDOWN_S or no_entry[i]:
+            mine = [signals[a.name, symbol] for a in agents if (a.name, symbol) in signals]
+            if symbol in open_ or halted == day or ts - last_close.get(symbol, 0) < config.COOLDOWN_S or no_entry[i] \
+                    or all(s.direction == "NEUTRAL" for s in mine):
                 continue
-            d = BossAgent.decide(symbol, [s for (_, sym), s in signals.items() if sym == symbol], bot["weights"],
-                                 max_age, now=ts)
-            if d.action == "NEUTRAL" or (symbol, d.action) in bot["blocked"]:
-                continue
+            d = BossAgent.decide(symbol, mine, bot["weights"], max_age, now=ts)
+            if d.action != "NEUTRAL" and (symbol, d.action) not in bot["blocked"]:
+                cands.append(d)
+        # Con los huecos limitados entra primero la señal más fuerte, no el primer activo de la lista.
+        for d in sorted(cands, key=lambda d: -abs(d.score)):
+            if len(open_) >= config.MAX_OPEN_POSITIONS:
+                break
+            symbol = d.symbol
             price = float(bars[symbol].close)
             plan = risk.build_plan(d.action, price, risk.atr(await market.ohlcv(symbol, config.ATR_TIMEFRAME, 100)),
                                    equity, BossAgent._structure(d, price))
@@ -379,7 +385,8 @@ async def walk_forward(data: dict, train_days: float, test_days: float, rules: d
 
 
 def report_wf(folds: list[dict]) -> str:
-    gene = lambda g: f"rango {g['or_min']} min, stop {g['stop']}, vol {g['vol_x']:g}x, {g['sides']}, {g['rr']:g}R"
+    gene = lambda g: (f"rango {g['or_min']} min, stop {g['stop']}, vol. relativo ≥{g['rvol']:g}x, {g['sides']}, "
+                      f"{'vela de apertura' if g['dir'] == 'candle' else 'ruptura'}, {g['rr']:g}R")
     lines = ["Validación fuera de muestra (walk-forward). Cada examen usa el genoma elegido SOLO con el periodo anterior."]
     for f in folds:
         b = f["best"]

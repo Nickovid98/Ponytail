@@ -547,6 +547,14 @@ async def check_macro():
     config.DAILY_TOKEN_BUDGET = 200_000
 
 
+def sessions(today, quiet=6):  # `quiet` sesiones tranquilas (volumen 10 por vela) y la de hoy
+    t0, bars = pd.Timestamp("2026-06-10 13:30", tz="UTC"), []
+    for d in range(quiet, 0, -1):
+        bars += [(t0 - pd.Timedelta(days=d) + pd.Timedelta(minutes=5 * i), 100, 100.5, 99.5, 100, 10) for i in range(6)]
+    bars += [(t0 + pd.Timedelta(minutes=5 * i), *r) for i, r in enumerate(today)]
+    return pd.DataFrame(bars, columns=["ts", "open", "high", "low", "close", "volume"])
+
+
 def check_orb():
     """Ruptura del rango de apertura: las reglas de la skill trader-entry, vela a vela."""
     def frame(rows):  # tres velas de ayer, el hueco de la noche y la sesión de hoy en velas de 5 minutos
@@ -562,7 +570,8 @@ def check_orb():
     assert "formación" in A([]).rationale and A([inside]).direction == "NEUTRAL"
     assert A([wick]).direction == "NEUTRAL" and A([level]).direction == "NEUTRAL"  # ni una mecha ni un cierre en el nivel
     s = A([wick, up])
-    assert s.direction == "LONG" and s.support == 100.0 and s.confidence >= 60 and s.features["volx"] == 3.0, s
+    assert s.direction == "LONG" and s.support == 100.0 and s.confidence >= 50 and s.features["volx"] == 3.0, s
+    assert A([up], stop="atr").support is None  # stop "atr": lo decide el gestor de riesgo
     assert A([up], stop="low").support == 99.0  # el stop puede ir al extremo opuesto del rango
     assert A([up, (101.2, 102, 101, 101.8, 30)]).direction == "NEUTRAL"  # una vela después ya es tarde
     assert A([down]).direction == "NEUTRAL"  # la skill solo opera largos
@@ -574,7 +583,19 @@ def check_orb():
     nonstop = frame(rng + [up])
     nonstop["ts"] = pd.date_range("2026-06-01", periods=len(nonstop), freq="5min", tz="UTC")
     assert "continuo" in ORBAgent.analyze(SYM, nonstop, orb_agent.DEFAULT, 300).rationale  # cripto: no hay apertura
-    assert len(orb_agent.genomes(300)) == 72 and {g["or_min"] for g in orb_agent.genomes(3600)} == {60}
+    assert len(orb_agent.genomes(300)) == 192 and {g["or_min"] for g in orb_agent.genomes(3600)} == {60}
+    # "Acciones en juego": volumen relativo del rango frente a las sesiones anteriores, y sentido de la vela de apertura.
+    P = lambda today, quiet=6, **genes: ORBAgent.analyze(SYM, sessions(today, quiet), orb_agent.DEFAULT | genes, 300)
+    hot = [(o, h, l, c, 50) for o, h, l, c, _ in rng]  # mismo rango con 5 veces el volumen habitual
+    s = P(hot + [up], rvol=2.0)
+    assert s.direction == "LONG" and s.features["rvol"] == 5.0 and s.confidence > P(rng + [up]).confidence, s
+    assert "en juego" in P(rng + [up], rvol=2.0).rationale  # volumen normal: no opera
+    assert P(hot + [up], quiet=3, rvol=1.0).direction == "NEUTRAL"  # sin historia para medirlo, no se da por bueno
+    assert P(hot + [up], **{"dir": "candle"}).direction == "LONG"  # la vela de apertura cerró arriba (100 -> 100,4)
+    assert P(hot + [down], sides="both", **{"dir": "candle"}).direction == "NEUTRAL"  # y por eso no vende
+    bear = [(100.4, 101, 99.5, 100.2, 50), (100.2, 100.8, 99, 100, 50), (100, 100.9, 99.6, 99.8, 50)]  # 100,4 -> 99,8
+    assert P(bear + [down], sides="both", **{"dir": "candle"}).direction == "SHORT"
+    assert P(bear + [up], sides="both", **{"dir": "candle"}).direction == "NEUTRAL"
     plan = risk.build_plan("LONG", 101.2, 1.0, 3550, structure=100.0)  # stop bajo el punto medio, con 0,2 ATR de margen
     assert abs(plan["sl"] - 99.8) < 1e-9 and abs(plan["tp"] - (101.2 + 2 * 1.4)) < 1e-9, plan
 
@@ -690,6 +711,18 @@ async def check_backtest():
     # ORB entrenado en un periodo y examinado en el siguiente, que el entrenamiento no ve.
     config.STRATEGY, config.MIN_AGENTS = "orb", 1
     try:
+        # Dos activos rompen en la misma vela y solo hay un hueco: entra el de más volumen relativo, no el primero.
+        flat = [(100, 100.5, 99.5, 100, 10)] * 3
+        mk = lambda vol: pd.concat([sessions(flat * 4, quiet=12), sessions([(100, 100.5, 99.5, 100, vol)] * 3 + [
+            (100, 101.4, 100, 101.2, vol)] + flat, quiet=0).assign(ts=lambda d: d.ts + pd.Timedelta(days=1))], ignore_index=True)
+        two = {name: {"5m": df, "15m": agg("15min", df), "1h": agg("1h", df)} for name, df in (("AAA", mk(10)), ("BBB", mk(60)))}
+        symbols, slots, config.SYMBOLS, config.MAX_OPEN_POSITIONS = config.SYMBOLS, config.MAX_OPEN_POSITIONS, ["AAA", "BBB"], 1
+        try:
+            ranked = await backtest.run(two, 1, genes={"or_min": 15, "sides": "both"})
+        finally:
+            config.SYMBOLS, config.MAX_OPEN_POSITIONS = symbols, slots
+        assert [t["symbol"] for t in ranked["trades"]] == ["BBB"], [(t["symbol"], t["opened"]) for t in ranked["trades"]]
+
         pop = [orb_agent.DEFAULT | {"or_min": m, "sides": side} for m, side in ((15, "long"), (30, "long"), (15, "both"))]
         rules, rr = {"max_loss": 1e9, "flat": True, "min_trades": 3}, config.REWARD_RISK
         end = s5.ts.iloc[-1] + pd.Timedelta(minutes=5)

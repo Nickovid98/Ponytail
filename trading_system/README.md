@@ -309,9 +309,14 @@ Con `STRATEGY=orb` opera un único agente, `agents/orb_agent.py`, con las reglas
 de las skills `trader-entry` y `trader-exit`: el rango es el máximo y el mínimo
 de los primeros minutos de la sesión, la entrada es la primera vela que CIERRA
 fuera de él (una mecha no cuenta), solo vale la primera ruptura del día y el
-stop va al punto medio del rango. Su genoma tiene cinco genes: minutos del
-rango, stop (punto medio o extremo opuesto), volumen mínimo de la ruptura,
-lados (solo largos o ambos) y objetivo en R.
+stop va al punto medio del rango. Su genoma tiene seis genes que se entrenan:
+minutos del rango, stop (punto medio, o `atr` para dejarlo al gestor de riesgo),
+lados (solo largos o ambos), objetivo en R (10 equivale a mantener hasta el
+cierre) y dos tomados del estudio de Zarattini, Barbon y Aziz (2024) sobre
+"acciones en juego": `rvol`, que exige que el rango de apertura traiga un
+volumen varias veces mayor que el de las sesiones anteriores (casi siempre por
+una noticia), y `dir`, que solo opera en el sentido de la vela de apertura.
+Cuando hay más señales que huecos entra primero la de mayor volumen relativo.
 
 ```bash
 STRATEGY=orb EXCHANGE_ID=yahoo SYMBOLS=NVDA,META,MSFT SMC_TIMEFRAME=1h ATR_TIMEFRAME=1h \
