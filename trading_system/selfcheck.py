@@ -576,7 +576,7 @@ async def check_backtest():
     o = np.r_[c[0], c[:-1]]
     m5 = pd.DataFrame({"ts": pd.date_range("2026-03-01", periods=n, freq="5min", tz="UTC"), "open": o,
                        "high": np.maximum(o, c) * 1.0005, "low": np.minimum(o, c) * 0.9995, "close": c, "volume": 1.0})
-    agg = lambda rule: m5.set_index("ts").resample(rule, label="left", closed="left").agg(
+    agg = lambda rule, src=m5: src.set_index("ts").resample(rule, label="left", closed="left").agg(
         {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna().reset_index()
     data = {SYM: {"5m": m5, "15m": agg("15min"), "1h": agg("1h"), "4h": agg("4h"), "1d": agg("1D")}}
 
@@ -600,6 +600,58 @@ async def check_backtest():
     assert "Operaciones" in backtest.report(res, 4, False)
     evo = await backtest.run(data, 4, evolution=True)
     assert evo["versions"]["smc"].startswith("SMC_Scalper_v") and evo["metrics"]["n"] >= 1
+
+    # Cuenta fondeada por generaciones: el bot muere al tocar su suelo, el sucesor hereda y corrige una
+    # causa, y la configuración global queda como estaba al terminar.
+    params = lambda x: (x["threshold"], x["atr_tf"], x["risk_pct"], x["blocked"])
+    before = config.DECISION_THRESHOLD, config.ATR_TIMEFRAME, config.RISK_PER_TRADE_PCT
+    config.FEE_PCT = 1.0  # comisión absurda: toda operación pierde y los bots mueren uno tras otro
+    lin = await backtest.run(data, 4, lineage={"max_loss": 30})
+    g = lin["lineage"]["generations"]
+    assert len(g) >= 2 and [x["gen"] for x in g] == list(range(1, len(g) + 1)), g
+    assert all(x["dead"] and x["net"] < 0 for x in g[:-1]) and not g[-1]["dead"]
+    for a, b in zip(g, g[1:]):
+        assert params(a) != params(b) and b["lesson"] != "configuración inicial" and a["end"] == b["born"], (a, b)
+    assert (config.DECISION_THRESHOLD, config.ATR_TIMEFRAME, config.RISK_PER_TRADE_PCT) == before
+    assert abs(sum(lin["lineage"]["weekly"]) - sum(t["pnl"] for t in lin["trades"])) < 1e-6
+    assert all((t["symbol"], t["side"]) not in map(tuple, g[t["gen"] - 1]["blocked"]) for t in lin["trades"])
+    assert "Linaje:" in backtest.report(lin, 4, False)
+    same = (await backtest.run(data, 4, lineage={"max_loss": 30, "learn": False}))["lineage"]["generations"]
+    assert len(same) >= 2 and len({str(params(x)) for x in same}) == 1  # sin aprendizaje, el sucesor es idéntico
+    config.FEE_PCT = 0.075
+
+    # Las cinco correcciones del sucesor, una por causa de muerte y en este orden de prioridad.
+    mk = lambda side, pnl, cost=1.0: {"symbol": SYM, "side": side, "pnl": pnl, "fees": cost, "slippage": 0.0,
+                                      "risk": 100.0, "votes": {}}
+    bot0, tfs = {"gen": 1, "born": None, "weights": {}, "blocked": set(), "lesson": ""}, {"5m", "15m", "1h", "4h", "1d"}
+    born = lambda bot, mine: backtest.successor(bot, mine, [], tfs, None)
+    try:
+        b = born(bot0, [mk("LONG", -60, cost=30)] * 3)  # costes = 30 % de lo arriesgado
+        assert config.ATR_TIMEFRAME == "1h" and b["gen"] == 2 and "stop más ancho" in b["lesson"]
+        born(bot0, [mk("LONG", -0.5)] * 3)  # gana antes de costes (+0,5 cada una), pierde después
+        assert config.DECISION_THRESHOLD == 0.35 and config.ATR_TIMEFRAME == "1h"
+        losing = [mk("SHORT", -50)] * 5 + [mk("LONG", 10)] * 5  # pierde antes de costes, y la culpa es de los cortos
+        b = born(bot0, losing)
+        assert b["blocked"] == {(SYM, "SHORT")} and bot0["blocked"] == set() and config.DECISION_THRESHOLD == 0.35
+        born(b, losing)  # no puede vetar también los largos: exige más acuerdo
+        assert config.DECISION_THRESHOLD == 0.4
+        config.DECISION_THRESHOLD = 0.75
+        born(b, losing)  # sin más filtros: arriesga menos
+        assert config.RISK_PER_TRADE_PCT == 0.75 and config.DECISION_THRESHOLD == 0.75
+    finally:
+        config.DECISION_THRESHOLD, config.ATR_TIMEFRAME, config.RISK_PER_TRADE_PCT = before
+    only_long = await backtest.run(data, 4, lineage={"max_loss": 1e9, "blocked": [(SYM, "SHORT")]})
+    assert only_long["trades"] and all(t["side"] == "LONG" for t in only_long["trades"])
+
+    # Mercado con sesiones (acciones): no se entra en la última media hora y nada queda abierto de noche.
+    s5 = m5[(m5.ts.dt.hour >= 14) & (m5.ts.dt.hour < 20)].reset_index(drop=True)
+    sdata = {SYM: {"5m": s5, "15m": agg("15min", s5), "1h": agg("1h", s5), "4h": agg("4h", s5), "1d": agg("1D", s5)}}
+    day = await backtest.run(sdata, 6, lineage={"max_loss": 1e9, "flat": True})
+    assert day["trades"] and len(day["lineage"]["generations"]) == 1 and day["open_at_end"] == 0
+    for t in day["trades"]:
+        assert t["opened"].date() == t["closed"].date() and 14 <= t["opened"].hour and t["opened"].strftime("%H:%M") <= "19:30", t
+    assert {t["exit_reason"] for t in day["trades"]} <= {"SL", "TP", "SESION", "LIMITE"}
+    assert any(t["exit_reason"] == "SESION" for t in day["trades"])
 
     class Ex:  # el descargador pagina de 1000 en 1000 y no deja huecos ni duplicados
         def milliseconds(self):

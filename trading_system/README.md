@@ -286,6 +286,23 @@ natural mejora o empeora el resultado.
 No reproduce el agente macro (no hay titulares históricos), el libro de órdenes,
 los pesos del optimizador ni los post-mortem con Claude.
 
+### Cuenta fondeada por generaciones (`--lineage`)
+
+`python backtest.py --days 365 --evolution --lineage 2000 [--flat]` simula una
+cuenta de fondeo: el bot muere cuando su saldo cae 2.000 bajo su mejor cierre
+diario (el suelo deja de subir al llegar al capital inicial, como en Topstep) y
+nace un sucesor con capital nuevo. El sucesor hereda los pesos de los agentes,
+calculados con el historial de todos los bots anteriores, más sus vetos y
+ajustes, y corrige una causa de la muerte, por este orden: stop más ancho si los
+costes superaban el 25 % de lo arriesgado, umbral más alto si acertaba antes de
+costes, veto al par activo/lado que más perdió, umbral más alto y, por último,
+menos riesgo por operación. `--flat` cierra todo al final de cada sesión y no
+entra en la última media hora (acciones). El informe da el resultado por semana.
+
+Cada bot solo aprende del pasado, así que el recorrido completo es una prueba
+honesta de si el aprendizaje sirve. Deja de serlo si se cambian las reglas y se
+repite hasta que el año salga bien: eso es memorizar el año.
+
 ## Dashboard
 
 El panel solo escucha en `localhost` (`.streamlit/config.toml`): tiene el kill
