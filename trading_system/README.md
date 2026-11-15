@@ -414,7 +414,8 @@ sandbox y en real los stops viven en el exchange.
 ```
 main.py                  orquestador asyncio (--once para un solo ciclo)
 backtest.py              simulación sobre velas históricas
-CLAUDE.md                guía breve para sesiones de Claude Code
+CLAUDE.md                guía de trabajo para sesiones de Claude Code
+ESTADO.md                qué está hecho, qué se probó ya (con sus cifras) y qué falta, para retomar el trabajo
 dashboard.py             la app (Streamlit): bots, jefe, laboratorio y ajustes
 Iniciar.bat              lanzador para Windows: prepara el entorno y abre la app
 optimizer.py             recompensas, confianza del jefe en cada bot y ajustes de la app
@@ -436,4 +437,5 @@ utils/
   alpha_vantage.py       noticias: Alpha Vantage + RSS
   db.py                  conexión SQLite y estado compartido
 .claude/skills/          37 skills de terceros para Claude Code (ver su README)
+.claude/settings.json    impide que Claude Code lea o edite .env (hay otro igual en la raíz del repositorio)
 ```

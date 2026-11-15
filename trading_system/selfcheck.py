@@ -3,6 +3,9 @@
 Usa una base de datos temporal y mercados falsos. Si algo de la lógica de
 riesgo, costes, decisión, ejecución, evolución o aprendizaje se rompe, este
 script falla.
+
+Para iterar deprisa se le pueden dar nombres (`python selfcheck.py optimizer app`)
+y ejecuta solo esas comprobaciones; esa pasada parcial no sustituye a la completa.
 """
 import asyncio
 import datetime as dt
@@ -1248,20 +1251,36 @@ async def check_topstepx():
 
 
 if __name__ == "__main__":
-    check_cache()
-    check_risk()
-    check_agents()
-    check_boss_decision()
-    asyncio.run(check_lifecycle())
-    asyncio.run(check_evolution())
-    check_tokens_and_alerts()
-    asyncio.run(check_ccxt_broker())
-    asyncio.run(check_macro())
-    check_optimizer()
-    asyncio.run(check_app())
-    check_orb()
-    asyncio.run(check_backtest())
-    asyncio.run(check_alpaca())
-    asyncio.run(check_topstepx())
-    print("selfcheck OK: caché, riesgo y costes, 5 agentes, jefe, ciclo completo de operación, evolución "
-          "(muerte, mutación, persistencia), tokens, alertas, broker CCXT, macro, recompensas y optimizador, controles de la app, ORB, backtest con validación fuera de muestra, datos de Alpaca y TopstepX (API falsa local, kill switch, sesión y frecuencia)")
+    checks = [check_cache, check_risk, check_agents, check_boss_decision, check_lifecycle, check_evolution,
+              check_tokens_and_alerts, check_ccxt_broker, check_macro, check_optimizer, check_app, check_orb,
+              check_backtest, check_alpaca, check_topstepx]
+    names = [c.__name__[6:] for c in checks]
+    wanted = set(sys.argv[1:])  # sin argumentos, todas; `selfcheck.py optimizer app` ejecuta solo esas dos
+    if wanted - set(names):
+        raise SystemExit(f"No existe: {' '.join(sorted(wanted - set(names)))}. Comprobaciones: {' '.join(names)}")
+    if "evolution" in wanted:
+        wanted.add("lifecycle")  # evolution comprueba el reinicio sobre la base de datos que deja lifecycle
+    noise = []  # avisos del motor mientras se le provocan fallos: se guardan y solo se enseñan si la comprobación falla
+    logging.lastResort = logging.Handler(logging.WARNING)
+    logging.lastResort.emit = lambda record: noise.append(logging.lastResort.format(record))
+    for check, name in zip(checks, names):
+        if wanted and name not in wanted:
+            continue
+        t0 = time.time()
+        try:
+            res = check()
+            if asyncio.iscoroutine(res):
+                asyncio.run(res)
+        except BaseException:
+            print("\n".join(noise[-40:]), file=sys.stderr)
+            raise
+        noise.clear()
+        print(f"{name}: bien ({time.time() - t0:.0f} s)", flush=True)
+    if wanted:
+        print(f"selfcheck PARCIAL ({' '.join(n for n in names if n in wanted)}): bien. Antes de un commit hay que "
+              "pasarlo entero, sin argumentos")
+    else:
+        print("selfcheck OK: caché, riesgo y costes, 5 agentes, jefe, ciclo completo de operación, evolución "
+              "(muerte, mutación, persistencia), tokens, alertas, broker CCXT, macro, recompensas y optimizador, "
+              "controles de la app, ORB, backtest con validación fuera de muestra, datos de Alpaca y TopstepX "
+              "(API falsa local, kill switch, sesión y frecuencia)")
