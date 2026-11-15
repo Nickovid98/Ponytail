@@ -19,7 +19,9 @@ log = logging.getLogger("exchange")
 def make_exchange():
     """Cliente CCXT configurado. En modo paper no usa claves, salvo en Alpaca: allí
     solo sirven para leer datos sin el límite de peticiones de los accesos anónimos."""
-    opts = {"enableRateLimit": True}
+    # include_OS_certificates: además de los certificados de certifi, acepta el que indique SSL_CERT_FILE
+    # (redes que inspeccionan el TLS: proxy de empresa, algunos antivirus).
+    opts = {"enableRateLimit": True, "options": {"include_OS_certificates": True}}
     alpaca_keys = config.EXCHANGE_ID == "alpaca" and bool(config.EXCHANGE_API_KEY)
     if config.EXECUTION_MODE != "paper" or alpaca_keys:
         opts |= {"apiKey": config.EXCHANGE_API_KEY, "secret": config.EXCHANGE_SECRET}

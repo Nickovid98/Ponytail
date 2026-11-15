@@ -12,6 +12,7 @@ import time
 from pydantic import BaseModel
 
 import config
+import optimizer
 from agents import Direction, Signal
 from utils import db, token_budget, trade_logger
 from utils import risk_manager as risk
@@ -61,6 +62,7 @@ class BossAgent:
 
     async def tick(self) -> None:
         """Un ciclo completo: salidas, cuenta, límites y nuevas entradas."""
+        optimizer.apply_params()  # lo que el operador haya ajustado en la app, ya recortado a su rango
         mode = config.EXECUTION_MODE
         # 1) Salidas. Se vigilan siempre, también con el bot detenido.
         for t in trade_logger.open_trades():
@@ -70,9 +72,11 @@ class BossAgent:
 
         # 2) Cuenta y límites de pérdida (con el PnL flotante incluido).
         equity = await self.broker.equity()
-        floating = 0.0
+        floating, marks = 0.0, {}  # marks: precio y resultado flotante de cada posición, para la app
         for t in trade_logger.open_trades():
-            floating += (await self.market.price(t["symbol"]) - t["entry"]) * t["qty"] * SIGN[t["side"]]
+            px = await self.market.price(t["symbol"])
+            marks[str(t["id"])] = [px, (px - t["entry"]) * t["qty"] * SIGN[t["side"]]]
+            floating += marks[str(t["id"])][1]
         total = equity + floating
         today = risk.trading_day()
         day_start = db.get_state(f"day_start:{mode}:{today}")
@@ -95,6 +99,7 @@ class BossAgent:
             if first_halt:
                 log.critical("KILL SWITCH ACTIVADO · %s · sin operar hasta el próximo día operativo", breach[1])
                 self.notify(f"🛑 KILL SWITCH · {breach[1]}")
+                trade_logger.log_event("risk", "boss", f"Kill switch: {breach[1]}. Sin operar hasta el próximo día operativo")
             db.set_state(f"halt:{mode}:{today}", breach[1])  # persiste: reiniciar el programa no lo levanta
         if breach or (kill.get("on") and kill.get("flatten", True)):
             open_before = bool(trade_logger.open_trades()) or first_halt
@@ -109,7 +114,7 @@ class BossAgent:
 
         db.set_state("account", {
             "equity": equity, "floating": floating, "day_pnl": total - day_start,
-            "total_pnl": total - start, "blocked": blocked, "mode": mode, "ts": time.time()})
+            "total_pnl": total - start, "blocked": blocked, "mode": mode, "ts": time.time(), "marks": marks})
 
         # 3) Decisión y, si procede, entrada por cada activo.
         self._payload_tokens = 0
@@ -119,7 +124,8 @@ class BossAgent:
         db.set_state("heartbeat", time.time())
 
     async def _step(self, symbol: str, equity: float, blocked: str | None) -> None:
-        payloads = [p for p in (db.get_state(f"signal:{name}:{symbol}") for name in self.max_age) if p]
+        bench = set(db.get_state("ctl:bench", []))  # bots que el operador ha mandado al banquillo: no votan
+        payloads = [p for p in (db.get_state(f"signal:{name}:{symbol}") for name in self.max_age if name not in bench) if p]
         self._payload_tokens += sum(token_budget.estimate(p) for p in payloads)
         d = self.decide(symbol, [token_budget.unpack(p) for p in payloads], db.get_state("weights", {}), self.max_age)
         try:
@@ -189,6 +195,7 @@ class BossAgent:
                f"SL {plan['sl']:.6g} · TP {plan['tp']:.6g} · riesgo neto {plan['risk_usd']:.2f} {config.QUOTE}")
         log.info(msg)
         self.notify(("📈 " if d.action == "LONG" else "📉 ") + msg)
+        trade_logger.log_event("trade", "boss", msg, d.symbol)
         return "orden ejecutada", plan
 
     @staticmethod
@@ -208,6 +215,13 @@ class BossAgent:
                f"{config.QUOTE} (comisiones {c['fees']:.2f}, deslizamiento {c['slippage']:.2f})")
         log.info(msg)
         self.notify(("✅ " if c["pnl"] > 0 else "❌ ") + msg)
+        trade_logger.log_event("trade", "boss", msg, c["symbol"], c["pnl"])
+        # Recompensas: cada bot cobra o paga según lo que votó. Con ellas el jefe reajusta su confianza.
+        for agent, pts in optimizer.reward(c).items():
+            trade_logger.log_event("reward", agent, f"{pts:+.2f} R por {'acertar' if pts > 0 else 'fallar'} en "
+                                   f"{c['symbol']} ({c['side']} cerrada por {reason})", c["symbol"], pts)
+        if db.get_state("ctl:auto_opt", True):
+            optimizer.run()
         if self.evolution:
             self.evolution.on_trade_closed(c)
 

@@ -17,7 +17,14 @@ renacen como una versión nueva con una lección añadida. Todo queda en SQLite.
 
 ## Puesta en marcha
 
-Necesitas Python 3.10 o superior.
+Necesitas Python 3.11 o superior.
+
+**En Windows, lo fácil:** doble clic en `Iniciar.bat`. La primera vez prepara el
+entorno (unos minutos) y crea tu `.env`; después abre la app en el navegador. El
+motor se enciende y se apaga desde la propia app, y al cerrar esa ventana se
+apagan los dos.
+
+A mano, en cualquier sistema:
 
 ```bash
 python -m venv venv
@@ -28,8 +35,8 @@ pip install -r requirements.txt
 python selfcheck.py              # 1. comprueba toda la lógica, sin red ni claves
 copy .env.example .env           # 2. Windows   (cp en macOS / Linux)
 python main.py --once            # 3. un ciclo real con datos del exchange
-python main.py                   # 4. el motor (déjalo corriendo)
-streamlit run dashboard.py       # 5. en otra terminal: el panel
+streamlit run dashboard.py       # 4. la app; el motor se enciende desde ella
+python main.py                   #    (o el motor suelto, sin app, en una terminal)
 ```
 
 Por defecto `PAPER_TRADING=True`: precios reales, órdenes simuladas y **ninguna
@@ -184,8 +191,14 @@ cuentan en el denominador, así que hace falta acuerdo amplio. Opera si
 - **Protección en el exchange.** Fuera del paper, el SL y el TP quedan como
   órdenes `reduceOnly`. Si no se pueden colocar, la posición se cierra.
 
-Los pesos de cada agente salen de su historial de aciertos (`optimizer.py`, una
-vez por semana, o `python optimizer.py --dry-run`).
+**Recompensas y confianza.** Al cerrarse una operación, cada bot cobra o paga en
+R (veces lo arriesgado): gana quien votó la dirección que resultó rentable y
+paga quien votó la contraria; un voto neutral no puntúa y un cierre forzoso por
+un límite de riesgo ni premia ni castiga. Una sola operación no mueve más de
+3 R. Con la recompensa media por voto el jefe fija la confianza (el peso) de
+cada bot en cada activo, entre ×0,25 y ×2, a partir de 5 votos. Lo recalcula él
+solo tras cada cierre (`optimizer.py`; se puede apagar en la app) y deja cada
+cambio en su diario.
 
 ## Alpaca: precios reales, órdenes simuladas
 
@@ -338,23 +351,40 @@ velas de 1 hora, y solo los últimos 60 días en velas de 5 minutos. El motor en
 vivo no tiene todavía una fuente de precios de acciones: esta estrategia solo
 se puede simular.
 
-## Dashboard
+## La app (`dashboard.py`)
 
-El panel solo escucha en `localhost` (`.streamlit/config.toml`): tiene el kill
-switch y el botón de aprobar órdenes y no pide contraseña.
+Solo escucha en `localhost` (`.streamlit/config.toml`): tiene el kill switch y
+el botón de aprobar órdenes y no pide contraseña.
 
+- **Barra lateral.** Encender y apagar el motor (se apaga al terminar el ciclo
+  en curso, nunca a mitad de una orden), KILL SWITCH de emergencia, modo AUTO o
+  MANUAL y tu objetivo de rentabilidad anual, contra el que la app compara el
+  resultado real.
+- **Sala de control.** Modo activo, capital, resultado neto, ritmo anual (solo
+  con dos semanas de historia o más), qué decide el jefe y por qué, la
+  propuesta pendiente de aprobar, posiciones abiertas con su precio y su
+  resultado flotante, y la bitácora de lo último que ha pasado.
+- **Los bots.** Una tarjeta por bot: recompensas acumuladas, nivel, aciertos,
+  fallos, racha, la confianza que le da el jefe y qué opina ahora. Debajo, cada
+  bot a fondo: su curva de recompensas, cada voto con su resultado, las
+  lecciones que heredó, sus relevos y un interruptor para mandarlo al banquillo
+  (ni analiza ni vota). Se pueden mirar los bots del motor o los de la última
+  simulación.
+- **El Jefe.** La confianza en cada bot por activo, su diario (operaciones,
+  cambios de confianza, límites, relevos y lo que tú cambies), "Optimizar
+  ahora", el interruptor de auto-optimización y las generaciones de cada bot.
+- **Laboratorio.** Simula una configuración sobre precios reales del pasado,
+  cripto o acciones, con o sin selección natural y reglas de cuenta fondeada, y
+  enseña el veredicto frente a tu objetivo, la curva, lo que hizo cada bot y el
+  resultado por semana. "Usar estos ajustes en el motor" los copia al motor.
+- **Ajustes.** Riesgo por operación, acuerdo exigido, objetivo, distancia del
+  stop, posiciones a la vez, descanso y bots mínimos, cada uno con su rango: el
+  motor recorta lo que se salga. El stop máximo, los límites de pérdida y el
+  paso a dinero real solo se cambian en `.env`. También qué claves tienes
+  conectadas y el consumo de Claude del día.
 
-- **Modo activo** en la cabecera: `PAPER TRADING ACTIVO`, `SANDBOX DEL EXCHANGE`
-  o `REAL TRADING`.
-- **Métricas**: capital, PnL neto, win rate global, costes pagados, PnL del día.
-- **Tarjetas de agentes** con su generación, estado, señal y justificación.
-- **Matriz genealógica**: cada versión de cada agente, 🟢 Vivo o 💀
-  Muerto-Sustituido, confianza actual y causa del último fallo.
-- **Consola de mutaciones**: muertes, post-mortem y renacimientos.
-- **Auditoría de tokens**: medidor del presupuesto diario y tokens por ciclo.
-- **KILL SWITCH**: bloquea nuevas entradas en el siguiente ciclo (30 s como
-  mucho) y, si dejas marcada la casilla, cierra lo abierto a mercado.
-- **AUTO / MANUAL**: en manual el jefe propone y espera "Aprobar y ejecutar".
+Con el motor apagado nadie vigila los stops de las posiciones simuladas; en
+sandbox y en real los stops viven en el exchange.
 
 ## Límites que conviene conocer
 
@@ -385,8 +415,9 @@ switch y el botón de aprobar órdenes y no pide contraseña.
 main.py                  orquestador asyncio (--once para un solo ciclo)
 backtest.py              simulación sobre velas históricas
 CLAUDE.md                guía breve para sesiones de Claude Code
-dashboard.py             panel Streamlit
-optimizer.py             métricas y pesos por historial de aciertos
+dashboard.py             la app (Streamlit): bots, jefe, laboratorio y ajustes
+Iniciar.bat              lanzador para Windows: prepara el entorno y abre la app
+optimizer.py             recompensas, confianza del jefe en cada bot y ajustes de la app
 selfcheck.py             comprobación de extremo a extremo
 config.py                toda la configuración (.env)
 trades_history.db        SQLite: operaciones, genealogía, estado (se crea solo)
@@ -397,7 +428,7 @@ agents/
   historian_agent.py  macro_agent.py  smc_agent.py  wyckoff_agent.py  sentiment_agent.py
 utils/
   risk_manager.py        ATR, stop, tamaño, comisiones y deslizamiento
-  trade_logger.py        operaciones y árbol genealógico en SQLite
+  trade_logger.py        operaciones, árbol genealógico y bitácora de actividad en SQLite
   token_budget.py        JSON minificado y auditoría de tokens
   cache_manager.py       caché en disco (diskcache)
   notifier.py            Telegram y Discord

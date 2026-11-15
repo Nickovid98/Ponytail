@@ -151,6 +151,7 @@ class EvolutionManager:
         for symbol in config.SYMBOLS:  # un muerto no vota
             db.del_state(f"signal:{agent}:{symbol}")
         log.warning("💀 %s ha muerto (%s): %s", g["name"], kind, cause)
+        trade_logger.log_event("death", agent, f"{g['name']} ha muerto ({kind}): {cause}")
         self.notify(f"💀 BOT_DEATH · {g['name']} ({kind})\n{cause}")
         task = asyncio.get_running_loop().create_task(self._evolve(agent, kind, cause, context))
         self._tasks.add(task)
@@ -173,6 +174,7 @@ class EvolutionManager:
         new = trade_logger.insert_version(g["agent"], g["version"] + 1, f"{lineage}_v{g['version'] + 1}",
                                           self._render(g["agent"], rules), rules, g["id"])
         log.warning("🟢 %s nace con la lección: %s", new["name"], m["rule"]["why"])
+        trade_logger.log_event("rebirth", g["agent"], f"Nace {new['name']} con la lección: {m['rule']['why']}")
         self.notify(f"🟢 REBIRTH · {g['name']} → {new['name']}\nCausa raíz: {m['root_cause']}\n"
                     f"Nueva regla: {m['rule']['why']}")
         return new

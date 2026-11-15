@@ -30,6 +30,9 @@ def _select(cols: list[str], table: str, tail: str, params: tuple, json_cols: tu
             status TEXT, born_ts REAL, died_ts REAL, instructions TEXT, rules TEXT,
             death_kind TEXT, death_cause TEXT, post_mortem TEXT, trade_id INTEGER,
             parent_id INTEGER, UNIQUE(agent, version))""")
+        q("""CREATE TABLE IF NOT EXISTS events(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, mode TEXT, kind TEXT, who TEXT,
+            symbol TEXT, text TEXT, value REAL)""")
         _ready = True
     out = []
     for r in q(f"SELECT {','.join(cols)} FROM {table} {tail}", params):
@@ -95,6 +98,29 @@ def entries_since(ts: float) -> list[float]:
     _trades("LIMIT 0")
     return [r[0] for r in q("SELECT opened_ts FROM trades WHERE opened_ts>=? AND mode=? ORDER BY opened_ts",
                             (ts, config.EXECUTION_MODE))]
+
+
+# --- Bitácora: lo que hacen los bots y el jefe, tal como lo cuenta la app -----
+def log_event(kind: str, who: str, text: str, symbol: str = "", value: float | None = None) -> None:
+    """kind: signal (un bot cambia de opinión), reward, trust, trade, risk, death, rebirth, bench, params."""
+    _trades("LIMIT 0")
+    q("INSERT INTO events(ts,mode,kind,who,symbol,text,value) VALUES(?,?,?,?,?,?,?)",
+      (time.time(), config.EXECUTION_MODE, kind, who, symbol, text, value))
+    last = q("SELECT last_insert_rowid()")[0][0]
+    if last % 1000 == 0:  # ponytail: se guardan las últimas 20.000 entradas; para más historia, archivar antes de borrar
+        q("DELETE FROM events WHERE id<=?", (last - 20000,))
+
+
+def events(limit: int = 100, who: str | None = None, kinds: tuple = ()) -> list[dict]:
+    """Las últimas entradas de la bitácora, la más reciente primero."""
+    _trades("LIMIT 0")
+    sql, params = "SELECT ts,kind,who,symbol,text,value FROM events WHERE mode=?", [config.EXECUTION_MODE]
+    if who:
+        sql, params = sql + " AND who=?", params + [who]
+    if kinds:
+        sql, params = sql + f" AND kind IN ({','.join('?' * len(kinds))})", params + list(kinds)
+    return [dict(zip(("ts", "kind", "who", "symbol", "text", "value"), r))
+            for r in q(sql + " ORDER BY id DESC LIMIT ?", (*params, limit))]
 
 
 # --- Árbol genealógico de agentes -------------------------------------------

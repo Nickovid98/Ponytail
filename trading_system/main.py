@@ -6,7 +6,9 @@
 import asyncio
 import logging
 import logging.handlers
+import os
 import sys
+import threading
 import time
 
 import ccxt
@@ -22,7 +24,7 @@ from agents.macro_agent import MacroAgent
 from agents.sentiment_agent import SentimentAgent
 from agents.smc_agent import SMCAgent
 from agents.wyckoff_agent import WyckoffAgent
-from utils import db, notifier, token_budget
+from utils import db, notifier, token_budget, trade_logger
 from utils.exchange import CcxtBroker, Market, PaperBroker
 
 log = logging.getLogger("main")
@@ -30,14 +32,26 @@ log = logging.getLogger("main")
 TRANSIENT = (ccxt.NetworkError, asyncio.TimeoutError, TimeoutError, ConnectionError)
 
 
+class Stop(Exception):
+    """Parada ordenada pedida desde la app."""
+
+
 async def run_agent(agent, symbol: str, market, evo: EvolutionManager) -> None:
     key = f"{agent.name}:{symbol}"
     if not evo.alive(agent.name):  # muerto y a la espera de su sucesor: no vota
         db.set_state(f"status:{key}", {"state": "muerto", "ts": time.time()})
         return
+    if agent.name in db.get_state("ctl:bench", []):  # el operador lo mandó al banquillo: ni analiza ni vota
+        db.del_state(f"signal:{key}")
+        db.set_state(f"status:{key}", {"state": "banquillo", "ts": time.time()})
+        return
     db.set_state(f"status:{key}", {"state": "analizando", "ts": time.time()})
     try:
         sig = evo.apply(await agent.run(symbol, market))
+        prev = db.get_state(f"signal:{key}")
+        if not prev or token_budget.unpack(prev).direction != sig.direction:  # cambió de opinión: a la bitácora
+            trade_logger.log_event("signal", agent.name, f"{sig.direction} {sig.confidence} · {sig.rationale}",
+                                   symbol, sig.confidence)
         db.set_state(f"signal:{key}", token_budget.pack(sig))  # lo que lee el jefe: JSON minificado
         state, error = "descanso", None
     except TRANSIENT as e:
@@ -63,9 +77,21 @@ async def boss_loop(boss: BossAgent) -> None:
     while True:
         try:
             await boss.tick()
-        except Exception:
+            db.del_state("boss:error")
+        except Exception as e:
             log.exception("Ciclo del jefe fallido; se reintenta")
-        await asyncio.sleep(config.BOSS_INTERVAL)
+            db.set_state("boss:error", {"ts": time.time(), "error": type(e).__name__})  # la app lo enseña
+        for _ in range(max(1, int(config.BOSS_INTERVAL))):  # la parada llega entre ciclos, nunca a mitad de una orden
+            if db.get_state("ctl:engine") == "stop":
+                raise Stop
+            await asyncio.sleep(1)
+
+
+async def alive_loop() -> None:
+    """Latido: la app sabe que el motor está encendido y un segundo motor se niega a arrancar."""
+    while True:
+        db.set_state("engine", {"pid": os.getpid(), "ts": time.time()})
+        await asyncio.sleep(3)
 
 
 async def optimizer_loop() -> None:
@@ -79,6 +105,19 @@ async def optimizer_loop() -> None:
 
 
 async def main(once: bool = False) -> None:
+    engine = db.get_state("engine")
+    if engine and time.time() - engine["ts"] < 20:
+        # ponytail: el candado es el latido. Techo: dos arranques en el mismo instante se cuelan. Mejora: bloqueo de archivo.
+        raise SystemExit("Ya hay un motor en marcha. Apágalo desde la app, o espera 20 segundos si se cerró mal.")
+    db.set_state("engine", {"pid": os.getpid(), "ts": time.time()})
+    db.del_state("ctl:engine")  # una orden de parada vieja no apaga un motor nuevo
+    try:
+        await _main(once)
+    finally:
+        db.del_state("engine")
+
+
+async def _main(once: bool) -> None:
     if config.BROKER == "topstepx":
         from utils.topstepx import TopstepBroker, TopstepMarket, TopstepPaperBroker
         market = TopstepMarket()
@@ -115,7 +154,8 @@ async def main(once: bool = False) -> None:
                 for v in b["votes"].values():
                     print(f"  {v['version']:<22} {v['direction']:<8} {v['confidence']:>3}  {v['rationale']}")
             return
-        await asyncio.gather(*(agent_loop(a, market, evo) for a in agents), boss_loop(boss), optimizer_loop())
+        await asyncio.gather(*(agent_loop(a, market, evo) for a in agents), boss_loop(boss), optimizer_loop(),
+                             alive_loop())
     finally:
         await market.close()
 
@@ -125,7 +165,13 @@ if __name__ == "__main__":
                         handlers=[logging.StreamHandler(),  # auditoría: consola y trading.log
                                   logging.handlers.RotatingFileHandler(
                                       config.LOG_FILE, maxBytes=20_000_000, backupCount=10, encoding="utf-8")])
+    if "--child" in sys.argv:
+        # Arrancado por la app, que le deja una tubería abierta: si la app se cierra, la tubería
+        # se cierra y el motor se apaga en orden en vez de seguir operando sin que nadie lo vea.
+        threading.Thread(target=lambda: (sys.stdin.read(), db.set_state("ctl:engine", "stop")), daemon=True).start()
     try:
         asyncio.run(main(once="--once" in sys.argv))
     except KeyboardInterrupt:
         print("\nMotor detenido. Las posiciones abiertas siguen con su SL/TP.")
+    except Stop:
+        log.info("Motor apagado desde la app.")

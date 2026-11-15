@@ -34,6 +34,7 @@ import pandas as pd
 
 import backtest
 import config
+import main as engine
 import optimizer
 from agents import AGENT_LABELS, Signal
 from agents.boss_agent import BossAgent
@@ -611,17 +612,146 @@ def check_optimizer():
         trade_logger.log_close(t, 104 if win else 98, "TP" if win else "SL")
 
     n = lambda d: {"direction": d, "confidence": 60}
-    for win in (True,) * 5 + (False,) * 3:  # "bueno" acierta siempre, "malo" nunca
-        trade(win, {"bueno": n("LONG" if win else "SHORT"), "malo": n("SHORT" if win else "LONG"), "mudo": n("NEUTRAL")})
+    # Recompensas en R: gana quien votó la dirección rentable, paga quien votó la contraria.
+    won = {"entry": 100, "sl": 98, "qty": 1, "pnl": 4.0, "side": "LONG", "exit_reason": "TP", "closed_ts": 1,
+           "votes": {"a": n("LONG"), "b": n("SHORT"), "c": n("NEUTRAL")}}
+    lost = won | {"pnl": -2.0, "exit_reason": "SL", "closed_ts": 2}
+    assert optimizer.reward(won) == {"a": 2.0, "b": -2.0}  # arriesgó 2 y ganó 4: 2 R; el neutral no puntúa
+    assert optimizer.reward(lost) == {"a": -1.0, "b": 1.0}  # el que avisó en contra cobra
+    assert optimizer.reward(won | {"side": "SHORT"}) == {"a": -2.0, "b": 2.0}
+    assert optimizer.reward(won | {"pnl": 40.0}) == {"a": 3.0, "b": -3.0}  # una operación no da más de 3 R
+    assert optimizer.reward(won | {"exit_reason": "LIMITE"}) == {} and optimizer.reward(won | {"sl": None}) == {}
+    board = optimizer.scoreboard([won | {"closed_ts": 3}, lost, won])
+    assert board["a"] == {"points": 3.0, "hits": 2, "misses": 1, "streak": 1, "best": 2.0, "last": 2.0,
+                          "history": [(1, 2.0), (2, 1.0), (3, 3.0)]}, board["a"]
+    assert board["b"]["points"] == -3.0 and board["b"]["streak"] == 0 and "c" not in board
+
+    # La confianza del jefe sale de esas recompensas: "bueno" acierta siempre, "malo" nunca, "regular" siempre compra.
+    for win in (True,) * 5 + (False,) * 3:
+        trade(win, {"bueno": n("LONG" if win else "SHORT"), "malo": n("SHORT" if win else "LONG"), "mudo": n("NEUTRAL"),
+                    "regular": n("LONG")})
     trade(True, {"novato": n("LONG")})
-    before = db.get_state("weights", {})
+    before, logged = db.get_state("weights", {}), len(trade_logger.events(500, kinds=("trust",)))
     rep = optimizer.run(dry_run=True)
     assert db.get_state("weights", {}) == before and rep["metrics"]["n"] >= 9
+    assert len(trade_logger.events(500, kinds=("trust",))) == logged  # un ensayo no deja rastro
     optimizer.run()
     w = db.get_state("weights")
-    assert w["bueno"]["X/USDT"] == round(2 * 13 / 18, 3) and w["malo"]["X/USDT"] == round(2 * 5 / 18, 3), w
+    assert w["bueno"]["X/USDT"] == 2.0 and w["malo"]["X/USDT"] == 0.25, w  # +13 R y -13 R en 8 votos: tope y suelo
+    assert w["regular"]["X/USDT"] == round(1 + 2 * 7 / 18, 3)  # +7 R en 8 votos, frenado por 10 votos fantasma
     assert "mudo" not in w and "novato" not in w  # neutral o con pocas muestras: peso intacto
-    assert db.get_state("optimizer:report")["agents"]["malo"]["X/USDT"]["precision"] == 0.0
+    r = db.get_state("optimizer:report")["agents"]["malo"]["X/USDT"]
+    assert r["precision"] == 0.0 and r["puntos"] == -13.0
+    trust = {e["who"]: e["text"] for e in trade_logger.events(500, kinds=("trust",)) if e["symbol"] == "X/USDT"}
+    assert "sube" in trust["bueno"] and "baja" in trust["malo"] and "×2.00" in trust["bueno"], trust  # queda en la bitácora
+
+    # Ajustes desde la app: fuera de rango se recortan, lo que no es un número se ignora y lo demás no se toca.
+    db.set_state("ctl:params", {"RISK_PER_TRADE_PCT": 50, "DECISION_THRESHOLD": "alto", "MAX_OPEN_POSITIONS": 3.7,
+                                "MAX_SL_PCT": 99, "PAPER_TRADING": False})
+    got = optimizer.params()
+    assert got["RISK_PER_TRADE_PCT"] == 2.0 and got["MAX_OPEN_POSITIONS"] == 3 and set(got) == set(optimizer.TUNABLE)
+    assert got["DECISION_THRESHOLD"] == optimizer.DEFAULTS["DECISION_THRESHOLD"]
+    keep = config.COOLDOWN_S, config.MAX_SL_PCT, config.PAPER_TRADING
+    config.COOLDOWN_S = 123.0
+    try:
+        optimizer.apply_params()
+        assert config.RISK_PER_TRADE_PCT == 2.0 and config.MAX_OPEN_POSITIONS == 3
+        assert (config.COOLDOWN_S, config.MAX_SL_PCT, config.PAPER_TRADING) == (123.0, keep[1], keep[2])
+    finally:
+        db.del_state("ctl:params")
+        config.RISK_PER_TRADE_PCT, config.MAX_OPEN_POSITIONS, config.COOLDOWN_S = 1.0, 2, keep[0]
+
+
+async def check_app():
+    """Lo que la app enseña y controla: banquillo, bitácora, recompensas al cerrar y parada ordenada."""
+    mode, config.EXECUTION_MODE = config.EXECUTION_MODE, "app"  # modo propio: sin operaciones ni bloqueos de antes
+    cooldown, config.COOLDOWN_S = config.COOLDOWN_S, 900
+    for key in ("ctl:kill", "ctl:bench", "ctl:params", "ctl:engine", "ctl:auto_opt", "engine", "order:fails",
+                "order:last_attempt"):
+        db.del_state(key)
+    db.set_state("ctl:mode", "AUTO")
+    try:
+        fm, notes = FakeMarket(), []
+        evo = EvolutionManager(notify=notes.append)
+        boss = BossAgent(fm, PaperBroker(fm), {n: 600 for n in AGENT_LABELS}, evo, notes.append)
+        said = lambda *kinds, **kw: trade_logger.events(500, kinds=kinds, **kw)
+
+        async def cycle():
+            for name in AGENT_LABELS:
+                db.set_state(f"signal:{name}:{SYM}", token_budget.pack(evo.apply(sig(name, "LONG", 80))))
+            await boss.tick()
+            await evo.drain()
+            return db.get_state(f"boss:{SYM}")
+
+        # Banquillo: el jefe no cuenta el voto de un bot apartado, y ese bot ni analiza ni deja señal.
+        db.set_state("ctl:bench", ["smc", "wyckoff", "sentiment"])
+        b = await cycle()
+        assert b["action"] == "NEUTRAL" and "solo 2 agentes" in b["reason"] and set(b["votes"]) == {"historian", "macro"}, b
+
+        class Bot:
+            name, interval, mood = "smc", 60, "LONG"
+
+            async def run(self, symbol, market):
+                return sig("smc", self.mood, 70)
+
+        bot = Bot()
+        await engine.run_agent(bot, SYM, fm, evo)
+        assert db.get_state(f"signal:smc:{SYM}") is None and db.get_state(f"status:smc:{SYM}")["state"] == "banquillo"
+        db.set_state("ctl:bench", [])
+        for bot.mood in ("LONG", "LONG", "SHORT"):  # la bitácora anota los cambios de opinión, no cada análisis
+            await engine.run_agent(bot, SYM, fm, evo)
+        flips = said("signal", who="smc")
+        assert len(flips) == 2 and flips[0]["text"].startswith("SHORT") and flips[1]["text"].startswith("LONG"), flips
+
+        # Operación ganadora: cada bot que votó a favor cobra en R y el jefe reajusta la confianza él solo.
+        assert (await cycle())["status"] == "orden ejecutada"
+        fm.p, t0 = 103.5, time.time()
+        await cycle()
+        paid, voters = said("reward"), lambda: {a for a, v in trade_logger.closed_trades(mode="app")[-1]["votes"].items()
+                                                if v["direction"] == "LONG"}
+        assert {e["who"] for e in paid} == voters() and len(paid) >= 3 and all(1.5 < e["value"] < 2.0 for e in paid), paid
+        assert "acertar" in paid[0]["text"] and [e["text"][:7] for e in said("trade")] == ["CERRADA", "ABIERTA"]
+        assert db.get_state("optimizer:last_run") >= t0
+        # Con la auto-optimización apagada el jefe no toca los pesos; la pérdida se cobra igual y hay relevo.
+        db.set_state("ctl:auto_opt", False)
+        fm.p, ran, config.COOLDOWN_S = 100.0, db.get_state("optimizer:last_run"), 0
+        assert (await cycle())["status"] == "orden ejecutada"
+        fm.p, config.COOLDOWN_S = 98.0, 900
+        await cycle()
+        fined = said("reward")[:-len(paid)]
+        assert db.get_state("optimizer:last_run") == ran and {e["who"] for e in fined} == voters()
+        assert all(e["value"] < 0 and "fallar" in e["text"] for e in fined)
+        assert said("death") and said("rebirth") and "lección" in said("rebirth")[0]["text"]
+
+        # Parada desde la app: termina el ciclo en curso y sale antes del siguiente. Y no arrancan dos motores.
+        class Ticker:
+            n, broken = 0, True
+
+            async def tick(self):
+                Ticker.n += 1
+                if self.broken:
+                    raise RuntimeError("sin mercado")
+
+        db.set_state("ctl:engine", "stop")
+        for broken, seen in ((True, "RuntimeError"), (False, None)):  # un ciclo roto se anota; uno bueno lo borra
+            ticker = Ticker()
+            ticker.broken = broken
+            try:
+                await asyncio.wait_for(engine.boss_loop(ticker), 10)
+                raise AssertionError("debió parar")
+            except engine.Stop:
+                assert (db.get_state("boss:error") or {}).get("error") == seen
+        assert Ticker.n == 2  # cada vez terminó su ciclo y salió antes del siguiente
+        db.set_state("engine", {"pid": 1, "ts": time.time()})
+        try:
+            await engine.main(once=True)
+            raise AssertionError("dos motores a la vez")
+        except SystemExit as e:
+            assert "Ya hay un motor" in str(e) and db.get_state("engine")["pid"] == 1  # el candado ajeno sigue ahí
+    finally:
+        for key in ("ctl:bench", "ctl:auto_opt", "ctl:engine", "engine"):
+            db.del_state(key)
+        config.EXECUTION_MODE, config.COOLDOWN_S = mode, cooldown
 
 
 async def check_backtest():
@@ -653,6 +783,11 @@ async def check_backtest():
         if t["exit_reason"] == "SL":  # la pérdida neta por stop es el 1 % del capital de ese momento
             assert 0.009 * t["equity_at_entry"] < -t["pnl"] < 0.0105 * t["equity_at_entry"], t["pnl"]
     assert "Operaciones" in backtest.report(res, 4, False)
+    out = json.loads(json.dumps(backtest.export(res)))  # lo que el laboratorio de la app lee: JSON puro
+    assert len(out["trades"]) == m["n"] and out["trades"][0]["closed_ts"] > out["trades"][0]["opened_ts"]
+    assert 2 <= len(out["curve"]) <= 401 and out["curve"][0][1] == config.CAPITAL and out["lineage"] is None
+    assert set(optimizer.scoreboard(out["trades"])) <= {"historian", "smc", "wyckoff", "sentiment"}
+    assert out["setup"]["params"]["RISK_PER_TRADE_PCT"] == config.RISK_PER_TRADE_PCT
     evo = await backtest.run(data, 4, evolution=True)
     assert evo["versions"]["smc"].startswith("SMC_Scalper_v") and evo["metrics"]["n"] >= 1
 
@@ -1123,9 +1258,10 @@ if __name__ == "__main__":
     asyncio.run(check_ccxt_broker())
     asyncio.run(check_macro())
     check_optimizer()
+    asyncio.run(check_app())
     check_orb()
     asyncio.run(check_backtest())
     asyncio.run(check_alpaca())
     asyncio.run(check_topstepx())
     print("selfcheck OK: caché, riesgo y costes, 5 agentes, jefe, ciclo completo de operación, evolución "
-          "(muerte, mutación, persistencia), tokens, alertas, broker CCXT, macro, optimizador, ORB, backtest con validación fuera de muestra, datos de Alpaca y TopstepX (API falsa local, kill switch, sesión y frecuencia)")
+          "(muerte, mutación, persistencia), tokens, alertas, broker CCXT, macro, recompensas y optimizador, controles de la app, ORB, backtest con validación fuera de muestra, datos de Alpaca y TopstepX (API falsa local, kill switch, sesión y frecuencia)")

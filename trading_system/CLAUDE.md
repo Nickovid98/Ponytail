@@ -7,7 +7,7 @@ Sistema de day trading multi-agente para cripto (CCXT) y futuros de Topstep (`BR
 
 - Comprobar todo, sin red ni claves: `venv/bin/python selfcheck.py`. Debe pasar antes de cada commit.
 - Entorno: `python -m venv venv && venv/bin/pip install -r requirements.txt`
-- Un ciclo real: `python main.py --once` · motor: `python main.py` · panel: `streamlit run dashboard.py`
+- Un ciclo real: `python main.py --once` · app: `streamlit run dashboard.py` (enciende el motor desde ella; en Windows, `Iniciar.bat`) · motor suelto: `python main.py`
 - Simulación histórica: `python backtest.py --days 30 [--evolution]`
 
 ## Reglas que no se rompen
@@ -29,7 +29,8 @@ Sistema de day trading multi-agente para cripto (CCXT) y futuros de Topstep (`BR
 - `agents/`: `Signal` (contrato), cinco agentes analíticos, `boss_agent.py` (decisión y ejecución), `evolution_manager.py` (muerte y renacimiento).
 - `utils/`: `risk_manager` (stop, tamaño, costes), `trade_logger` (operaciones y genealogía en SQLite), `token_budget`, `cache_manager`, `notifier`, `exchange` (PaperBroker y CcxtBroker), `topstepx` (cliente REST, datos y brokers de futuros), `alpha_vantage`, `db`.
 - `agents/orb_agent.py`: ruptura del rango de apertura (`STRATEGY=orb`); se entrena y examina con `backtest.py --walk-forward`.
-- `main.py` orquesta; `optimizer.py` ajusta pesos; `backtest.py` simula; `dashboard.py` muestra y controla.
+- `main.py` orquesta; `optimizer.py` reparte recompensas en R, fija la confianza del jefe en cada bot y valida los ajustes de la app; `backtest.py` simula; `dashboard.py` es la app.
+- Estado motor <-> app en la tabla `kv`: `ctl:*` son órdenes de la app (kill, mode, params, bench, auto_opt, engine), `engine` es el latido del motor.
 
 ## Skills útiles aquí (`.claude/skills/`)
 

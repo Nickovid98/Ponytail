@@ -321,14 +321,15 @@ async def _run(data: dict, days: float, evolution: bool, quiet: bool, fl: dict, 
             weekly[min(len(weekly) - 1, int((t["closed"] - clock[0]) / week))] += t["pnl"]
         lin = {"generations": gens, "weekly": weekly.tolist(), "net": sum(t["pnl"] for t in closed)}
     peak = np.maximum.accumulate(curve)
+    thin = max(1, -(-len(curve) // 400))  # la curva que se guarda: 400 puntos como mucho
     return {
-        "lineage": lin,
+        "lineage": lin, "curve": [[clock[i].timestamp(), float(curve[i])] for i in range(0, len(curve), thin)],
         "metrics": optimizer.metrics(closed), "equity": equity, "open_at_end": len(open_), "trades": closed,
         "max_drawdown_pct": float(((np.array(curve) - peak) / peak).min() * 100),
         "costs": sum(t["fees"] + t["slippage"] for t in closed),
         "exits": {r: n for r in ("SL", "TP", "LIMITE", "SESION", "MUERTE")
                   if (n := sum(t["exit_reason"] == r for t in closed)) or r in ("SL", "TP", "LIMITE")},
-        "agents": {a: {s: {"votos": n, "precision": ok / n} for s, (n, ok) in by.items()}
+        "agents": {a: {s: {"votos": n, "precision": ok / n} for s, (n, ok, _) in by.items()}
                    for a, by in optimizer.agent_stats(closed).items()},
         "versions": {a: g["name"] for a, g in evo.active.items()} if evo else None,
     }
@@ -405,6 +406,23 @@ def report_wf(folds: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def export(res: dict) -> dict:
+    """El resultado en JSON, con las operaciones en el mismo formato que las del motor en vivo:
+    así la app enseña una simulación con las mismas pantallas."""
+    keep = ("id", "symbol", "side", "qty", "entry", "sl", "tp", "exit", "pnl", "fees", "slippage", "exit_reason", "votes")
+    out = {k: res[k] for k in ("metrics", "equity", "max_drawdown_pct", "costs", "exits", "curve", "open_at_end")}
+    out["trades"] = [{k: t[k] for k in keep} | {"opened_ts": t["opened"].timestamp(), "closed_ts": t["closed"].timestamp()}
+                     for t in res["trades"]]
+    lin = res.get("lineage")
+    out["lineage"] = lin and lin | {"generations": [g | {"born": g["born"].timestamp(), "end": g["end"].timestamp(),
+                                                         "blocked": [list(b) for b in g["blocked"]]}
+                                                    for g in lin["generations"]]}
+    out["setup"] = {"symbols": config.SYMBOLS, "exchange": config.EXCHANGE_ID, "strategy": config.STRATEGY,
+                    "capital": config.CAPITAL, "fee_pct": config.FEE_PCT, "slippage_pct": config.SLIPPAGE_PCT,
+                    "params": {k: getattr(config, k) for k in optimizer.TUNABLE}}
+    return out
+
+
 def report(res: dict, days: float, evolution: bool) -> str:
     m, fmt = res["metrics"], lambda x: "n/d" if x is None else f"{x:.2f}"
     lines = [f"Backtest de {days:g} días · {', '.join(config.SYMBOLS)} · {config.EXCHANGE_ID} · umbral {config.DECISION_THRESHOLD} · "
@@ -445,6 +463,7 @@ async def main() -> None:
     ap.add_argument("--lineage", type=float, metavar="USD", help="cuenta fondeada: al perder USD bajo su mejor cierre "
                     "diario el bot muere y nace un sucesor que hereda lo aprendido y corrige una causa")
     ap.add_argument("--flat", action="store_true", help="con --lineage: cierra todo al final de cada sesión")
+    ap.add_argument("--save", metavar="ARCHIVO", help="guarda el resultado en JSON (lo usa el laboratorio de la app)")
     ap.add_argument("--walk-forward", metavar="ENTRENA,EXAMINA", help="días de entrenamiento y de examen: elige el "
                     "genoma ORB en cada periodo y lo examina en el siguiente (STRATEGY=orb)")
     a = ap.parse_args()
@@ -467,7 +486,11 @@ async def main() -> None:
         print(report_wf(await walk_forward(data, train_days, test_days, {"max_loss": a.lineage or 2000, "flat": a.flat})))
         return
     lineage = {"max_loss": a.lineage, "flat": a.flat} if a.lineage else None
-    print(report(await run(data, a.days, a.evolution, quiet=False, lineage=lineage), a.days, a.evolution))
+    res = await run(data, a.days, a.evolution, quiet=False, lineage=lineage)
+    print(report(res, a.days, a.evolution))
+    if a.save:
+        with open(a.save, "w", encoding="utf-8") as fh:
+            json.dump(export(res) | {"days": a.days, "evolution": a.evolution, "report": report(res, a.days, a.evolution)}, fh)
 
 
 if __name__ == "__main__":
