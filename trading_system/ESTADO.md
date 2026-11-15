@@ -5,8 +5,9 @@ Actualizado el 15-11-2026. Quien cierre una tarea actualiza este archivo en el m
 ## En una pantalla
 
 - **Dónde está el código.** En la rama `claude/alpha-vantage-mcp-connection-xpwtx6`. La rama por defecto del
-  repositorio (`bench/agentic-126`) no contiene `trading_system/`: una sesión nueva tiene que partir de la
-  primera (`git fetch origin <rama> && git merge --ff-only origin/<rama>`). No se ha pedido un pull request.
+  repositorio (`bench/agentic-126`) no contiene `trading_system/`: una sesión nueva tiene que traer la primera
+  (`git fetch origin <rama> && git merge --ff-only FETCH_HEAD`, probado en un clon nuevo el 15-11). No se ha
+  pedido un pull request.
 - **Qué funciona.** El motor (cinco bots, jefe, riesgo, selección natural), la app local, el simulador con cuenta
   fondeada y examen fuera de muestra, y el modo Topstep contra una API falsa. `selfcheck.py` pasa entero.
 - **Qué dice la investigación.** Con precios reales y después de costes, nada de lo probado gana dinero en datos
