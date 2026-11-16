@@ -1,6 +1,6 @@
 # Estado del proyecto
 
-Actualizado el 15-11-2026. Quien cierre una tarea actualiza este archivo en el mismo commit.
+Actualizado el 16-11-2026. Quien cierre una tarea actualiza este archivo en el mismo commit.
 
 ## En una pantalla
 
@@ -47,8 +47,13 @@ todo al final de la sesión, y relevos corregidos con reglas fijas, sin Claude.
 4. ¿Quiere fusionar la rama de trabajo en la rama por defecto?
 5. Opcional, en su `.env`: una clave de Anthropic. Sin ella todo funciona con reglas fijas; con ella el bot Macro
    puntúa titulares y Claude diagnostica cada relevo (modelo en `CLAUDE_MODEL`, tope en `DAILY_TOKEN_BUDGET`).
+6. ¿Sigue queriendo instalar en su PC los programas de los que dependen algunas skills (Strix, agent-reach, el
+   plugin de claude-mem)? Lo pidió el 11-11 y desde la nube no se pudo; lo que necesita cada una está en
+   `.claude/skills/README.md`.
 
 ## Pendientes, por orden
+
+Los pendientes 1, 4 y 5 solo se pueden comprobar en el ordenador del usuario; desde la nube fue imposible.
 
 1. **La app en Windows.** Depende de la respuesta 1. Si falla, se arregla a partir del mensaje de error que
    copie. Hecho cuando el usuario confirme que la app abre y el motor se enciende desde ella.
@@ -201,3 +206,42 @@ Universo de 93 acciones: AAPL MSFT NVDA AMZN GOOGL META TSLA AMD AVGO NFLX CRM O
 UBER ABNB SHOP PYPL COIN PLTR SNOW CRWD PANW NET DDOG ZS MDB SNAP PINS RBLX U DKNG HOOD SOFI AFRM UPST RIVN LCID
 NIO F GM BA CAT DE GE JPM BAC C WFC GS MS V MA AXP DIS CMCSA T VZ WMT TGT COST HD LOW NKE SBUX MCD KO PEP PG JNJ
 PFE MRNA LLY UNH ABBV MRK XOM CVX OXY SLB BABA PDD JD TTWO MARA RIOT SMCI ARM DELL.
+
+## Historia: qué se pidió y con qué commit se entregó
+
+Todo salió de una sola conversación de nube, entre septiembre y noviembre de 2026. Los textos entre comillas son
+del usuario.
+
+1. **Antes de noviembre, fuera de este repositorio.** Un resumen diario de bolsa por correo, que sigue
+   funcionando en aquella conversación, y un bot anterior por webhook (Flask, con Alpaca y Binance) que pidió
+   abrir como `.exe` con consola. Se le entregó como archivos sueltos; nada de eso está aquí.
+2. **10-11, sistema multi-agente.** Cinco agentes que devuelven JSON estricto, un Agente Jefe que pondera según
+   los aciertos de cada uno y aplica el riesgo (stop por ATR o estructura, límite diario, 1–2 % por operación),
+   ejecución por CCXT en sandbox, panel en Streamlit con kill switch y modo automático o manual, caché, bucles
+   asíncronos, registro de operaciones con el voto de cada agente y optimizador de pesos.
+3. **10-11, "selección natural".** El agente que falla, o cuya recomendación acaba en stop o en pérdida neta,
+   muere y nace su versión siguiente con una regla para no repetirlo. Genealogía en SQLite que se recarga al
+   reiniciar, `PAPER_TRADING=True`, comisiones y deslizamiento descontados antes de juzgar al bot, mensajes entre
+   agentes de menos de 150 tokens con auditoría, y avisos por Telegram o Discord.
+4. **10 y 11-11, skills.** Copiar las de siete repositorios a `.claude/skills/` y aprovecharlas. Después, "hazlo
+   ahora todo, ya instale claude code directamente en mi ordenador": instalar en su PC los programas de los que
+   dependen, cosa que desde la nube no se pudo hacer.
+
+   Los puntos 2 a 4 son los commits `1fd014f` a `45c37d8`.
+5. **11-11, TopstepX** (`71b44b0`). Futuros de fondeo por la API de ProjectX: ejecución solo local, kill switch al
+   75–80 % del límite diario, prevención de alta frecuencia y registro de todo en `trading.log`.
+6. **11-11, Alpaca** (`795b170`). "ahora no tengo la cuenta, usa la cuenta de alpaca y la otra para empezar a
+   probar que tal sirve el bot": datos de Alpaca para simular, sin envío de órdenes.
+7. **12-11, un año de cuenta fondeada** (`5001f94`). 50.000, bot eliminado al perder 2.000 y relevado por otro que
+   hereda lo aprendido y corrige el error, objetivo de 500 por semana; también "con acciones reales, como se haria
+   normalmente en una cuenta de fondeo".
+8. **12-11, ruptura del rango de apertura** (`d883dd1` y `8bd1d36`). Entrenar en un periodo y examinar en otro que
+   no haya visto. Después, "que el bot estudie traders rentables de la ultima decada, estrategias, que pueda
+   anticipar cosas debido a noticias": los genes de "acciones en juego".
+9. **12-11, "Entonces que debería hacer".** La recomendación que abre este archivo.
+10. **14-11, la plataforma** (`b8a46fe`). "una plataforma más amigable en la que se pueda ver cada uno [...] como
+    se comporta, que se les de recompensas cada vez que hagan algo bueno, que aqui haya un bot encargado de los
+    demás, que sea el jefe, y que yo pueda controlarlo, optimizarlo, y que solo tambien lo haga [...] la especie de
+    app para abrirla en mi pc". Es la app de `dashboard.py`, que en Windows se abre con `Iniciar.bat`.
+11. **15-11, traspaso** (`cde97e1` y `f0c7f09`). La guía de trabajo, este archivo, las pruebas parciales y el
+    bloqueo de `.env`, para que otra sesión pueda continuar.
