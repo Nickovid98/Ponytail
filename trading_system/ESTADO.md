@@ -39,7 +39,8 @@ todo al final de la sesión, y relevos corregidos con reglas fijas, sin Claude.
 
 ## Esperando respuesta del usuario
 
-1. ¿Arranca `Iniciar.bat` en su Windows? Se escribió sin poder ejecutarlo.
+1. ¿Le abre la app con doble clic en `Iniciar.bat`? Claude lo ejecutó en su PC el 16-11 y funcionó (ver
+   "Comprobado en Windows"); falta que él lo confirme con su propio doble clic.
 2. ¿"40–50 %" es rentabilidad anual o porcentaje de operaciones ganadoras?
 3. ¿Parar, o hacer la prueba de "acciones en juego"? Criterio que se le propuso: dos años de exámenes fuera de
    muestra, resultado neto positivo, más de la mitad de los periodos en positivo y ninguna cuenta perdida; si no
@@ -53,18 +54,19 @@ todo al final de la sesión, y relevos corregidos con reglas fijas, sin Claude.
 
 ## Pendientes, por orden
 
-Los pendientes 1, 4 y 5 solo se pueden comprobar en el ordenador del usuario; desde la nube fue imposible.
+Los pendientes 1 y 5 solo se pueden comprobar en el ordenador del usuario; desde la nube fue imposible.
 
-1. **La app en Windows.** Depende de la respuesta 1. Si falla, se arregla a partir del mensaje de error que
-   copie. Hecho cuando el usuario confirme que la app abre y el motor se enciende desde ella.
+1. **La app en Windows.** Probada por Claude en su PC el 16-11 (abre, enciende el motor, se apaga al cerrar).
+   Hecho cuando el usuario confirme que le abre con doble clic. Si falla, se arregla a partir del mensaje de
+   error que copie.
 2. **Aclarar el objetivo** (respuesta 2) antes de tocar nada de estrategia.
 3. **Prueba de "acciones en juego"**, solo si el usuario la elige y aporta claves de una cuenta paper de Alpaca.
    Falta un cargador de velas de acciones de Alpaca (5 minutos, dos años o más, universo amplio) y elegir cada
    día las de mayor volumen relativo; hoy Alpaca solo sirve cripto en `make_exchange()`. El criterio de la
    respuesta 3 se escribe aquí antes de lanzar nada. Las claves están solo en el PC del usuario: o la prueba se
    ejecuta allí, o él las guarda como secretos del entorno de nube.
-4. **Binance**, que es el exchange por defecto: comprobar en el PC del usuario que `python main.py --once`
-   termina un ciclo. Desde la nube responde 451.
+4. ~~**Binance**~~: hecho el 16-11. `python main.py --once` termina un ciclo en el PC del usuario con datos
+   reales de `binanceusdm` (desde la nube sigue respondiendo 451).
 5. **TopstepX real**, cuando tenga cuenta: los pasos están en la sección "Topstep" del `README.md`. Sin verificar:
    los nombres de los campos de las respuestas, el signo de los ticks de stop y objetivo
    (`PROP_BRACKET_SIGNED=false` si la plataforma rechaza la orden) y la regla de los 5 ticks, que viene de una
@@ -163,10 +165,22 @@ Comprobado en Linux, en la nube:
   retirados, y una negativa o una respuesta cortada acaban en voto neutral o en la regla fija. Solo se han
   ejecutado contra un cliente falso.
 
+Comprobado en Windows, en el PC del usuario (16-11, sesión de Claude Code de escritorio, Python 3.14):
+
+- `selfcheck.py` entero.
+- `Iniciar.bat` ejecutado con su ruta completa, como un doble clic: la app abre en `localhost:8501` y lee la
+  base de datos que ya había, el motor se enciende desde la app con datos reales de Binance, y al cerrar el
+  lanzador se apagan la app y el motor.
+- `python main.py --once` contra `binanceusdm`: un ciclo completo con los cinco bots y la decisión del jefe.
+- Arreglado al probar: `Iniciar.bat` esperaba con `timeout`, que fallaba si el `timeout` de Git iba antes en el
+  PATH o sin consola; ahora espera con `ping`. `main.py --once` con la salida a un archivo se caía en Windows
+  (cp1252 no tiene la "σ" del Historiador); ahora escribe en UTF-8. La prueba de caché de `selfcheck.py`
+  fallaba 1 de cada 6 veces en Windows por un plazo de 50 ms; ahora usa 0,5 s.
+- Sin probar con un doble clic del propio usuario.
+
 Sin comprobar:
 
-- `Iniciar.bat` y la app en Windows.
-- Binance, TopstepX real y cualquier ruta con claves: órdenes en un exchange, la API de Claude, Telegram,
+- Binance con claves, TopstepX real y cualquier ruta con claves: órdenes en un exchange, la API de Claude, Telegram,
   Discord y los RSS. La clave gratuita de Alpha Vantage no incluye noticias.
 
 ## Cómo se hicieron las pruebas
@@ -245,3 +259,9 @@ del usuario.
     app para abrirla en mi pc". Es la app de `dashboard.py`, que en Windows se abre con `Iniciar.bat`.
 11. **15-11, traspaso** (`cde97e1` y `f0c7f09`). La guía de trabajo, este archivo, las pruebas parciales y el
     bloqueo de `.env`, para que otra sesión pueda continuar.
+12. **15 y 16-11, en su PC (Claude Code de escritorio).** En paralelo, sin saber de la app de `b8a46fe`, otra
+    sesión hizo una plataforma distinta ("haz entonces la plataforma en la que pueda ver los bots [...] que no
+    tenga que abrir nada de codigo"). Se descartó en favor de esta y quedó solo en la rama local
+    `respaldo/plataforma-local` (`f9ebbfb`, sin subir). Lo único que tenía y esta no: editor del calendario de
+    eventos, descarga de operaciones en CSV, botón de `selfcheck` y registro del motor en pantalla. Después, las
+    pruebas de Windows y Binance de "Comprobado en Windows".

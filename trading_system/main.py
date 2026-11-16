@@ -161,6 +161,9 @@ async def _main(once: bool) -> None:
 
 
 if __name__ == "__main__":
+    # En Windows, con la salida a un archivo, Python usa cp1252 y un "σ" de un bot tumbaba el --once.
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(encoding="utf-8", errors="replace")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s",
                         handlers=[logging.StreamHandler(),  # auditoría: consola y trading.log
                                   logging.handlers.RotatingFileHandler(

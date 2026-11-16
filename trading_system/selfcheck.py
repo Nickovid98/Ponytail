@@ -909,9 +909,10 @@ async def check_backtest():
 
 
 def check_cache():
-    cache_manager.cache_set("k", {"a": 1}, 0.05)  # diskcache: persistente y con caducidad
+    # diskcache: persistente y con caducidad. Con 50 ms fallaba 1 de cada 6 veces en Windows (disco y antivirus).
+    cache_manager.cache_set("k", {"a": 1}, 0.5)
     assert cache_manager.cache_get("k") == {"a": 1}
-    time.sleep(0.1)
+    time.sleep(0.7)
     assert cache_manager.cache_get("k") is None and cache_manager.window(5) == 60 and cache_manager.window(900) == 180
     db.set_state("s", [1, 2])
     assert db.get_state("s") == [1, 2] and db.get_state("nada", "x") == "x"

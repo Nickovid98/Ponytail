@@ -28,7 +28,7 @@ echo.
 echo Abriendo la app en el navegador: http://localhost:8501
 echo Deja esta ventana abierta. Al cerrarla se apagan la app y el motor.
 echo.
-start "" /b cmd /c "timeout /t 5 /nobreak >nul & start http://localhost:8501"
+start "" /b cmd /c "ping -n 6 127.0.0.1 >nul & start http://localhost:8501"
 venv\Scripts\python -m streamlit run dashboard.py --server.headless true --server.port 8501
 pause
 exit /b 0
