@@ -37,6 +37,8 @@ class BossAgent:
         self.evolution = evolution  # gestor de selección natural (opcional)
         self.notify = notify or (lambda text: None)
         self._payload_tokens = 0
+        self._room = None  # cuenta de fondeo: lo que aún se puede perder hoy sin llegar al kill switch ni al suelo
+        self._marks: dict = {}  # último precio de cada posición abierta (id -> [precio, flotante])
 
     @staticmethod
     def decide(symbol: str, signals: list[Signal], weights: dict, max_age: dict,
@@ -63,24 +65,40 @@ class BossAgent:
     async def tick(self) -> None:
         """Un ciclo completo: salidas, cuenta, límites y nuevas entradas."""
         optimizer.apply_params()  # lo que el operador haya ajustado en la app, ya recortado a su rango
+        if config.FUNDED and db.get_state("fund") is None:
+            self._fund(False, config.CAPITAL)  # antes de leer el saldo: la cuenta 1 empieza en CAPITAL desde el primer ciclo
+        if config.FUNDED and db.get_state("fund", {}).get("atr_tf"):
+            config.ATR_TIMEFRAME = db.get_state("fund")["atr_tf"]  # lección de una cuenta perdida: stop más ancho
         mode = config.EXECUTION_MODE
-        # 1) Salidas. Se vigilan siempre, también con el bot detenido.
+        # 1) Salidas. Se vigilan siempre, también con el bot detenido, y una a una: si falta el precio de un
+        #    activo (Yahoo o el exchange fallan), los demás siguen vigilados y los límites siguen corriendo.
         for t in trade_logger.open_trades():
-            res = await self.broker.check_exit(t)
+            try:
+                res = await self.broker.check_exit(t)
+            except Exception as e:
+                log.warning("Sin datos para vigilar %s: %s", t["symbol"], e)
+                continue
             if res:
                 self._close(t, res, res["reason"])
 
         # 2) Cuenta y límites de pérdida (con el PnL flotante incluido).
         equity = await self.broker.equity()
         floating, marks = 0.0, {}  # marks: precio y resultado flotante de cada posición, para la app
+        last_marks = db.get_state("account", {}).get("marks", {})
         for t in trade_logger.open_trades():
-            px = await self.market.price(t["symbol"])
+            try:
+                px = await self.market.price(t["symbol"])
+            except Exception as e:  # sin precio: el último conocido (o la entrada) para no cegar los límites
+                px = (last_marks.get(str(t["id"])) or [t["entry"]])[0]
+                log.warning("Sin precio de %s: se usa el último conocido (%s)", t["symbol"], e)
             marks[str(t["id"])] = [px, (px - t["entry"]) * t["qty"] * SIGN[t["side"]]]
             floating += marks[str(t["id"])][1]
         total = equity + floating
+        self._marks = marks
         today = risk.trading_day()
         day_start = db.get_state(f"day_start:{mode}:{today}")
-        if day_start is None:
+        new_day = day_start is None
+        if new_day:
             if hasattr(self.broker, "day_start_equity"):
                 total_0 = await self.broker.day_start_equity()  # descuenta lo ya realizado hoy
             else:
@@ -89,6 +107,16 @@ class BossAgent:
         start = db.get_state(f"start_equity:{mode}")
         if start is None:
             db.set_state(f"start_equity:{mode}", start := total)
+
+        fund = self._fund(new_day, total) if config.FUNDED else None
+        if fund and (fund.get("lost") or total <= self._floor(fund)):
+            if await self._relevo(fund, total, today):
+                equity, floating, marks = await self.broker.equity(), 0.0, {}
+                total = day_start = start = equity  # la cuenta nueva estrena capital y día
+            fund = db.get_state("fund")
+        if fund:  # lo que aún se puede perder hoy sin tocar el kill switch ni el suelo
+            kill_at = config.PROP_DAILY_LOSS_LIMIT_USD * config.PROP_KILL_AT_PCT / 100
+            self._room = min(kill_at - max(0.0, day_start - total), total - self._floor(fund))
 
         kill = db.get_state("ctl:kill", {"on": False})
         breach = risk.check_limits(total, day_start, start)
@@ -109,25 +137,102 @@ class BossAgent:
         allow_entries, must_flatten = risk.session()
         if must_flatten:
             await self._flatten("SESION")  # fin de la sesión: nada queda abierto
+        else:
+            # Acciones: se cierran en los últimos minutos de la sesión de Nueva York (cripto sigue abierta). Lo que
+            # siga abierto de una sesión anterior (el motor estaba apagado al cierre) se cierra en cuanto abre la bolsa,
+            # a precio de ahora: con la bolsa cerrada no hay precio al que cerrar.
+            closing, since = risk.nyse_session()[1], risk.nyse_open_since()
+            await self._flatten("SESION", only=lambda t: risk.is_stock(t["symbol"]) and (
+                closing or (since is not None and t["opened_ts"] < since)))
+        lost = fund.get("lost") and f"cuenta {fund['gen']} perdida: se cierra lo que queda abierto" if fund else None
         blocked = (kill.get("reason") or "kill switch activado") if kill.get("on") \
-            else db.get_state(f"halt:{mode}:{today}") or (None if allow_entries else "fuera del horario de entradas")
+            else lost or db.get_state(f"halt:{mode}:{today}") or (None if allow_entries else "fuera del horario de entradas")
 
         db.set_state("account", {
             "equity": equity, "floating": floating, "day_pnl": total - day_start,
-            "total_pnl": total - start, "blocked": blocked, "mode": mode, "ts": time.time(), "marks": marks})
+            "total_pnl": total - start, "blocked": blocked, "mode": mode, "ts": time.time(), "marks": marks}
+            | ({"gen": fund["gen"], "floor": self._floor(fund), "peak": fund["peak"]} if fund else {}))
 
-        # 3) Decisión y, si procede, entrada por cada activo.
+        # 3) Decisión de cada activo. Con los huecos limitados entra primero la señal más fuerte del ciclo, no el
+        # primer activo de la lista, como en el backtest. No reserva huecos para las acciones: con la bolsa cerrada,
+        # cripto puede ocuparlos todos (con 3 posiciones y 2 criptos siempre queda uno).
         self._payload_tokens = 0
-        for symbol in config.SYMBOLS:
-            await self._step(symbol, equity, blocked)
+        decisions = [self._decide(symbol) for symbol in config.SYMBOLS]
+        for d in sorted(decisions, key=lambda d: -abs(d.score)):
+            await self._step(d, equity, blocked)
         token_budget.record_cycle(self._payload_tokens)
         db.set_state("heartbeat", time.time())
 
-    async def _step(self, symbol: str, equity: float, blocked: str | None) -> None:
+    # --- Cuenta de fondeo simulada (PROP_MAX_LOSS_USD) ---------------------
+    @staticmethod
+    def _floor(fund: dict) -> float:
+        """Saldo en el que se pierde la cuenta: el máximo de pérdida bajo su mejor cierre diario, sin pasar de CAPITAL."""
+        return min(fund["peak"] - config.PROP_MAX_LOSS_USD, config.CAPITAL)
+
+    @staticmethod
+    def _fund(new_day: bool, total: float) -> dict:
+        """Estado de la cuenta en curso. El mejor cierre diario es el saldo del último ciclo del día anterior,
+        como en el backtest. La primera cuenta empieza en CAPITAL aunque la base de datos ya tuviera operaciones."""
+        fund = db.get_state("fund") or {"gen": 1, "born": time.time(), "base": trade_logger.realized_pnl(),
+                                        "peak": config.CAPITAL, "last_total": config.CAPITAL,
+                                        "lesson": "configuración inicial", "blocked": [], "atr_tf": None}
+        if new_day:
+            fund["peak"] = max(fund["peak"], fund.get("last_total", fund["peak"]))
+        fund["last_total"] = total
+        db.set_state("fund", fund)
+        return fund
+
+    async def _relevo(self, fund: dict, total: float, today: str) -> bool:
+        """La cuenta tocó su suelo: queda perdida aunque el precio rebote (como en una prueba real), se cierra
+        todo, se apunta y nace otra que hereda lo aprendido y corrige UNA causa de la pérdida, con el mismo
+        diagnóstico que el backtest (backtest.successor)."""
+        from backtest import STOP_TFS, successor  # aquí y no arriba: backtest importa este módulo
+        mode = config.EXECUTION_MODE
+        if not fund.get("lost"):
+            fund["lost"] = {"ts": time.time(), "total": total, "floor": self._floor(fund)}
+            db.set_state("fund", fund)
+        total, floor = fund["lost"]["total"], fund["lost"]["floor"]
+        await self._flatten("MUERTE")
+        if trade_logger.open_trades():
+            return False  # algo no se pudo cerrar (sin precio): sin entradas nuevas, se reintenta en el próximo ciclo
+        mine = [t | {"risk": abs(t["entry"] - t["sl"]) * t["qty"]}
+                for t in trade_logger.closed_trades(since=fund["born"], mode=mode)]
+        bot = {"gen": fund["gen"], "born": fund["born"], "weights": {}, "lesson": fund["lesson"],
+               "blocked": {tuple(b) for b in fund["blocked"]}}
+        # ponytail: el relevo hereda los pesos que el optimizador ya recalcula tras cada cierre, no los del
+        # backtest (fijos por generación). Techo: el umbral y el riesgo de la lección viven en los ajustes de la app
+        # y el operador puede deshacerlos; entonces el panel anuncia una lección que ya no se aplica.
+        new = successor(bot, mine, trade_logger.closed_trades(mode=mode), set(STOP_TFS), time.time())
+        net = sum(t["pnl"] for t in mine)
+        # Primero la cuenta nueva: si el programa se cae a mitad, el relevo y su lección no se repiten.
+        db.set_state("fund", {"gen": fund["gen"] + 1, "born": time.time(), "base": trade_logger.realized_pnl(),
+                              "peak": config.CAPITAL, "last_total": config.CAPITAL, "lesson": new["lesson"],
+                              "blocked": sorted(map(list, new["blocked"])), "atr_tf": config.ATR_TIMEFRAME})
+        db.set_state("fund:history", db.get_state("fund:history", []) + [{
+            "gen": fund["gen"], "born": fund["born"], "end": time.time(), "n": len(mine), "net": net,
+            "floor": floor, "lesson": fund["lesson"]}])
+        # Umbral y riesgo van a los ajustes de la app: allí se ven y el operador puede deshacerlos.
+        db.set_state("ctl:params", db.get_state("ctl:params", {}) | {
+            "DECISION_THRESHOLD": config.DECISION_THRESHOLD, "RISK_PER_TRADE_PCT": config.RISK_PER_TRADE_PCT})
+        db.set_state(f"start_equity:{mode}", config.CAPITAL)
+        db.set_state(f"day_start:{mode}:{today}", config.CAPITAL)
+        db.del_state(f"halt:{mode}:{today}")
+        msg = (f"Cuenta {fund['gen']} perdida: el saldo ({total:,.2f}) tocó su suelo ({floor:,.2f}) tras {len(mine)} "
+               f"operaciones y {net:+,.2f} {config.QUOTE}. Nace la cuenta {fund['gen'] + 1} con {config.CAPITAL:,.0f}: "
+               f"{new['lesson']}")
+        log.critical(msg)
+        self.notify("💀 " + msg)
+        trade_logger.log_event("death", "boss", msg, value=net)
+        return True
+
+    def _decide(self, symbol: str) -> Decision:
         bench = set(db.get_state("ctl:bench", []))  # bots que el operador ha mandado al banquillo: no votan
         payloads = [p for p in (db.get_state(f"signal:{name}:{symbol}") for name in self.max_age if name not in bench) if p]
         self._payload_tokens += sum(token_budget.estimate(p) for p in payloads)
-        d = self.decide(symbol, [token_budget.unpack(p) for p in payloads], db.get_state("weights", {}), self.max_age)
+        return self.decide(symbol, [token_budget.unpack(p) for p in payloads], db.get_state("weights", {}), self.max_age)
+
+    async def _step(self, d: Decision, equity: float, blocked: str | None) -> None:
+        symbol = d.symbol
         try:
             status, plan = await self._maybe_trade(d, equity, blocked)
         except Exception as e:
@@ -143,6 +248,11 @@ class BossAgent:
             return "posición ya abierta", None
         if blocked:
             return f"bloqueado: {blocked}", None
+        if risk.is_stock(d.symbol) and not risk.nyse_session()[0]:
+            return "bolsa de Nueva York cerrada o fuera del horario de entradas", None
+        fund = db.get_state("fund", {}) if config.FUNDED else {}
+        if [d.symbol, d.action] in fund.get("blocked", []):
+            return f"vetado por la cuenta {fund['gen']}: {d.action} en {d.symbol} perdía", None
         if len(open_) >= config.MAX_OPEN_POSITIONS:
             return "máximo de posiciones abiertas", None
         if time.time() - trade_logger.last_close_ts(d.symbol) < config.COOLDOWN_S:
@@ -160,10 +270,18 @@ class BossAgent:
             return "espera mínima entre órdenes", None
 
         price = await self.market.price(d.symbol)
-        atr_v = risk.atr(await self.market.ohlcv(d.symbol, config.ATR_TIMEFRAME, 100))
-        plan = risk.build_plan(d.action, price, atr_v, equity, self._structure(d, price))
+        atr_tf = config.STOCK_TIMEFRAME if risk.is_stock(d.symbol) else config.ATR_TIMEFRAME  # acciones: velas de 1 h
+        atr_v = risk.atr(await self.market.ohlcv(d.symbol, atr_tf, 100))
+        plan = risk.build_plan(d.action, price, atr_v, equity, self._structure(d, price), symbol=d.symbol)
         if plan is None:
             return "plan de riesgo inválido (ATR, capital o tamaño mínimo)", None
+        if self._room is not None:
+            # Cuenta de fondeo: no se abre nada cuyo stop, sumado al de lo ya abierto, pase del kill switch de
+            # hoy o del suelo de la cuenta. Así un mal día se queda en el límite en vez de rebasarlo.
+            at_risk = sum(self._open_risk(t) for t in open_) + plan["risk_usd"]
+            if at_risk > self._room:
+                return (f"sin margen: con esta operación habría {at_risk:,.0f} en juego y solo quedan "
+                        f"{max(0.0, self._room):,.0f} hasta el kill switch o el suelo"), None
 
         if db.get_state("ctl:mode", config.START_MODE) == "MANUAL":
             # La aprobación caduca y se consume: lo que se ejecuta es siempre la
@@ -225,8 +343,25 @@ class BossAgent:
         if self.evolution:
             self.evolution.on_trade_closed(c)
 
-    async def _flatten(self, reason: str) -> None:
+    def _open_risk(self, t: dict) -> float:
+        """Lo que aún puede costar una posición abierta si salta su stop, en la misma base que el saldo con lo
+        flotante: desde su último precio (una ganancia flotante también está en juego), más su comisión de
+        entrada (el saldo aún no la descuenta), la de salida y el deslizamiento del stop."""
+        px = (self._marks.get(str(t["id"])) or [t["entry"]])[0]
+        to_stop = max(0.0, (px - t["sl"]) * SIGN[t["side"]] * t["qty"])
+        slip = abs(t["sl"] - risk.slip(t["sl"], buying=t["side"] != "LONG", symbol=t["symbol"])) * t["qty"]
+        return to_stop + (t["fees"] or 0.0) + risk.fee(t["sl"], t["qty"], t["symbol"]) + slip
+
+    async def _flatten(self, reason: str, only=None) -> None:
+        """Cierra lo abierto; con `only`, solo las operaciones para las que only(operación) es cierto. Con la
+        bolsa de Nueva York cerrada las acciones no se tocan (no hay precio al que cerrarlas): se cierran en la
+        apertura, y mientras tanto una cuenta perdida sigue sin operar."""
+        nyse_closed = risk.nyse_open_since() is None
         for t in trade_logger.open_trades():
+            if only and not only(t):
+                continue
+            if nyse_closed and risk.is_stock(t["symbol"]):
+                continue
             try:
                 self._close(t, await self.broker.close(t), reason)
             except Exception:

@@ -33,7 +33,7 @@ async def _av_news(symbol: str) -> list[dict]:
     global _av_last
     if not config.ALPHAVANTAGE_API_KEY:
         return []
-    ticker = "CRYPTO:" + symbol.split("/")[0]
+    ticker = "CRYPTO:" + symbol.split("/")[0] if "/" in symbol else symbol  # las acciones van con su símbolo: NVDA
     key = f"av_news:{ticker}"
     hit = cache.cache_get(key)
     if hit is not None:

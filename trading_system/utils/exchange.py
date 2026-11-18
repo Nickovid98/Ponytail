@@ -1,19 +1,74 @@
-"""Conexión de mercado (CCXT) y los dos brokers: simulado y real.
+"""Conexión de mercado (CCXT para cripto, Yahoo para acciones) y los dos brokers: simulado y real.
 
 Ambos brokers exponen lo mismo: equity(), open(), check_exit(), close().
 """
+import asyncio
 import logging
 import math
+import time
 
 import ccxt.async_support as ccxt
 import pandas as pd
+import requests
 
 import config
 from utils import cache_manager as cache
+from utils import db
 from utils import risk_manager as rm
 from utils import trade_logger
 
 log = logging.getLogger("exchange")
+YAHOO = "https://query1.finance.yahoo.com/v8/finance/chart/"
+# Lo que se pide de cada intervalo; de ahí se recorta lo que pida el agente. Las de 4 h salen de las de 1 h.
+YAHOO_RANGE = {"1m": "1d", "5m": "60d", "15m": "1mo", "1h": "1y", "1d": "2y"}
+
+
+def _yahoo_get(symbol: str, interval: str, span: str) -> tuple[int, dict]:
+    r = requests.get(YAHOO + symbol, params={"interval": interval, "range": span},
+                     headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+    try:
+        return r.status_code, r.json()
+    except ValueError:
+        return r.status_code, {}
+
+
+class YahooUnknown(ConnectionError):
+    """Yahoo no conoce el símbolo (404): solo al arrancar es motivo para no seguir."""
+
+
+_yahoo_pause = 0.0  # tras un 429 (demasiadas peticiones) no se le pide nada a Yahoo durante un rato
+
+
+async def yahoo_chart(symbol: str, interval: str, span: str) -> dict:
+    """Velas y último precio de una acción en Yahoo Finance (gratis, sin clave), ya comprobados.
+    Devuelve {"price", "rows": [[ms, o, h, l, c, v], ...]}. Cualquier fallo, también una respuesta con otro
+    formato, sale como ConnectionError: es de la red o de Yahoo, no del bot, y no lo mata."""
+    # ponytail: Yahoo no tiene API oficial. Techo: si cambia el formato o bloquea, las acciones dejan de
+    # tener señales y de operar (cripto sigue); no hay segunda fuente.
+    global _yahoo_pause
+    if time.monotonic() < _yahoo_pause:
+        raise ConnectionError("Yahoo pidió esperar (demasiadas peticiones)")
+    try:
+        status, body = await asyncio.to_thread(_yahoo_get, symbol, interval, span)
+    except requests.RequestException as e:
+        raise ConnectionError(f"Yahoo no responde ({type(e).__name__})") from e
+    if status == 429:
+        _yahoo_pause = time.monotonic() + 120
+    if status == 404:
+        raise YahooUnknown(f"Yahoo no conoce {symbol}")
+    try:
+        r = body["chart"]["result"][0]
+        price = float(r["meta"]["regularMarketPrice"])
+        q = r["indicators"]["quote"][0] if r.get("timestamp") else {}
+        # Las velas que llegan vacías (sin negocio) se descartan.
+        rows = [[t * 1000, float(o), float(h), float(lo), float(c), float(v or 0)] for t, o, h, lo, c, v in zip(
+            r.get("timestamp") or [], q.get("open", []), q.get("high", []), q.get("low", []), q.get("close", []),
+            q.get("volume", [])) if None not in (o, h, lo, c)]
+    except (KeyError, IndexError, TypeError, ValueError) as e:
+        raise ConnectionError(f"Yahoo respondió {status} con un formato inesperado para {symbol}") from e
+    if status != 200 or not math.isfinite(price) or price <= 0:
+        raise ConnectionError(f"Yahoo respondió {status} para {symbol}")
+    return {"price": price, "rows": rows}
 
 
 def make_exchange():
@@ -37,16 +92,17 @@ def make_exchange():
             ex.set_markets([{"id": s, "symbol": s, "base": s.split("/")[0], "quote": s.split("/")[1],
                              "baseId": s.split("/")[0], "quoteId": s.split("/")[1], "type": "spot", "spot": True,
                              "active": True, "precision": {"price": 0.01, "amount": 1e-9},
-                             "limits": {"amount": {}, "price": {}, "cost": {}}} for s in config.SYMBOLS])
+                             "limits": {"amount": {}, "price": {}, "cost": {}}} for s in config.SYMBOLS if "/" in s])
     return ex
 
 
 class Market:
-    """Datos de mercado cacheados."""
+    """Datos de mercado cacheados. Cripto por CCXT; las acciones (símbolos sin "/") por Yahoo."""
 
     def __init__(self):
-        self.ex = make_exchange()
-        if config.EXECUTION_MODE == "sandbox" and config.EXCHANGE_ID != "alpaca":
+        crypto = [s for s in config.SYMBOLS if not rm.is_stock(s)]
+        self.ex = make_exchange() if crypto or not config.SYMBOLS else None  # solo acciones: no hace falta exchange
+        if self.ex and config.EXECUTION_MODE == "sandbox" and config.EXCHANGE_ID != "alpaca":
             kind = config.SANDBOX_KIND
             if kind == "auto":
                 # Binance retiró el testnet clásico de futuros: ccxt acepta
@@ -59,12 +115,48 @@ class Market:
                 self.ex.set_sandbox_mode(True)
 
     async def start(self) -> None:
-        await self.ex.load_markets()
-        missing = [s for s in config.SYMBOLS if s not in self.ex.markets]
-        if missing:
-            raise SystemExit(f"Símbolos desconocidos en {config.EXCHANGE_ID}: {missing}")
+        if self.ex:
+            await self.ex.load_markets()
+            missing = [s for s in config.SYMBOLS if not rm.is_stock(s) and s not in self.ex.markets]
+            if missing:
+                raise SystemExit(f"Símbolos desconocidos en {config.EXCHANGE_ID}: {missing}")
+        for s in filter(rm.is_stock, config.SYMBOLS):
+            try:
+                await yahoo_chart(s, "1d", "5d")
+            except YahooUnknown as e:
+                raise SystemExit(f"Sin datos de la acción {s} en Yahoo: {e}") from e
+            except ConnectionError as e:  # pasajero: arranca igual (cripto no espera) y los bots lo reintentan
+                log.warning("Yahoo no respondió al arrancar con %s: %s", s, e)
+
+    async def _stock_bars(self, symbol: str, tf: str, limit: int) -> pd.DataFrame:
+        interval = "1h" if tf == "4h" else tf
+        if interval not in YAHOO_RANGE:
+            raise ValueError(f"Yahoo no da velas de {tf}")
+        # Con la bolsa cerrada las velas no cambian y se guardan 30 min; la clave cambia al abrir, así que en la
+        # apertura se piden nuevas al momento en vez de seguir con las de ayer.
+        open_now = rm.nyse_open_since() is not None
+        key = f"ohlcv:yahoo:{symbol}:{interval}:{'abierta' if open_now else 'cerrada'}"
+        rows = cache.cache_get(key)
+        if rows is None:
+            rows = (await yahoo_chart(symbol, interval, YAHOO_RANGE[interval]))["rows"]
+            cache.cache_set(key, rows, cache.window(self._seconds(interval) / 4) if open_now else 1800)
+        df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
+        df["ts"] = pd.to_datetime(df.ts, unit="ms", utc=True)
+        if tf == "4h":
+            df = df.set_index("ts").resample("4h", label="left", closed="left").agg(
+                {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna().reset_index()
+        # Solo velas cerradas, como en el backtest: una mecha de la vela en curso no dispara nada. El precio de
+        # ahora lo da price(), y PaperBroker.check_exit lo mira además de las velas.
+        df = df[df.ts + pd.Timedelta(seconds=self._seconds(tf)) <= pd.Timestamp.now(tz="UTC")]
+        return df.tail(limit).reset_index(drop=True)
+
+    @staticmethod
+    def _seconds(tf: str) -> int:
+        return int(tf[:-1]) * {"m": 60, "h": 3600, "d": 86400}[tf[-1]]
 
     async def ohlcv(self, symbol: str, tf: str, limit: int = 300) -> pd.DataFrame:
+        if rm.is_stock(symbol):
+            return await self._stock_bars(symbol, tf, limit)
         key = f"ohlcv:{config.EXCHANGE_ID}:{config.EXECUTION_MODE}:{symbol}:{tf}:{limit}"
         rows = cache.cache_get(key)
         if rows is None:
@@ -92,15 +184,21 @@ class Market:
         return df
 
     async def price(self, symbol: str) -> float:
-        key = f"price:{config.EXCHANGE_ID}:{config.EXECUTION_MODE}:{symbol}"
+        stock = rm.is_stock(symbol)
+        key = f"price:{'yahoo' if stock else config.EXCHANGE_ID}:{config.EXECUTION_MODE}:{symbol}"
         p = cache.cache_get(key)
         if p is None:
-            p = float((await self.ex.fetch_ticker(symbol))["last"])
+            if stock:  # la petición más pequeña que trae el precio; fuera de la sesión, Yahoo da el último cierre
+                p = (await yahoo_chart(symbol, "1d", "1d"))["price"]
+            else:
+                p = float((await self.ex.fetch_ticker(symbol))["last"])
             cache.cache_set(key, p, 5)
         return p
 
     async def book_imbalance(self, symbol: str, depth: int = 20) -> float:
         """(bids - asks) / (bids + asks) en los primeros niveles del libro: [-1, 1]."""
+        if rm.is_stock(symbol):
+            raise NotImplementedError("Yahoo no da el libro de órdenes de las acciones")
         key = f"book:{config.EXCHANGE_ID}:{symbol}"
         v = cache.cache_get(key)
         if v is None:
@@ -112,7 +210,8 @@ class Market:
         return v
 
     async def close(self) -> None:
-        await self.ex.close()
+        if self.ex:
+            await self.ex.close()
 
 
 class PaperBroker:
@@ -123,17 +222,23 @@ class PaperBroker:
         self.market = market
 
     async def equity(self) -> float:
-        return config.CAPITAL + trade_logger.realized_pnl()
+        # En la cuenta de fondeo simulada cada cuenta nueva empieza en CAPITAL: se descuenta lo de las anteriores.
+        base = db.get_state("fund", {}).get("base", 0.0) if config.FUNDED else 0.0
+        return config.CAPITAL + trade_logger.realized_pnl() - base
 
     # Tres ganchos que redefine la simulación de futuros (contratos enteros, costes por contrato).
     def _size(self, symbol, qty):
+        if rm.is_stock(symbol):  # acciones enteras, siempre hacia abajo: el riesgo nunca pasa del previsto
+            if int(qty) < 1:
+                raise ValueError(f"el tamaño no llega a 1 acción de {symbol}")
+            return float(int(qty))
         return qty
 
     def _slip(self, symbol, ref, buying):
-        return rm.slip(ref, buying)
+        return rm.slip(ref, buying, symbol)
 
     def _fee(self, symbol, price, qty):
-        return rm.fee(price, qty)
+        return rm.fee(price, qty, symbol)
 
     def _fill(self, symbol, ref: float, qty: float, buying: bool, market_order: bool = True, **extra) -> dict:
         price = self._slip(symbol, ref, buying) if market_order else ref
@@ -145,20 +250,36 @@ class PaperBroker:
 
     async def check_exit(self, t: dict) -> dict | None:
         # ponytail: SL/TP se evalúan con velas de 1m (cacheadas 60 s) más el
-        # último precio en cada ciclo del jefe. Techo: resolución de 1 minuto y
-        # no modela huecos de precio más allá del deslizamiento fijo.
+        # último precio en cada ciclo del jefe. Techo: resolución de 1 minuto, y en
+        # cripto no modela huecos de precio más allá del deslizamiento fijo.
         # Mejora: stream de ticks por websocket.
-        df = await self.market.ohlcv(t["symbol"], "1m", 10)
+        # Se mira desde la apertura de la operación, vela a vela y en orden: un stop tocado mientras el motor
+        # estaba apagado también cuenta. Con velas de 1 min hasta donde llegan (16 h en cripto, la sesión de hoy
+        # en acciones); si la operación es más vieja, con velas más gruesas para no perder lo de antes.
+        long, stock = t["side"] == "LONG", rm.is_stock(t["symbol"])
+        age = time.time() - t["opened_ts"]
+        if stock:
+            since_open = rm.nyse_open_since()
+            tf = "1m" if since_open is not None and t["opened_ts"] >= since_open else "5m"
+        else:
+            tf = "1m" if age < 16 * 3600 else "5m" if age < 3.4 * 86400 else "1h"
+        step = {"1m": 60, "5m": 300, "1h": 3600}[tf]
+        bars = min(1000 if not stock else 5000, 60 * (int(age // (60 * step)) + 1) + 10)  # tramos de 60: caché
+        df = await self.market.ohlcv(t["symbol"], tf, bars)
         since = df[df.ts >= pd.Timestamp(t["opened_ts"], unit="s", tz="UTC")]
         last = await self.market.price(t["symbol"])
-        lo = min([last, *since.low])
-        hi = max([last, *since.high])
-        long = t["side"] == "LONG"
-        # Si una misma vela toca ambos niveles se asume el stop: lo conservador.
-        if (lo <= t["sl"]) if long else (hi >= t["sl"]):
-            return self._fill(t["symbol"], t["sl"], t["qty"], buying=not long, reason="SL")  # el stop es orden a mercado
-        if (hi >= t["tp"]) if long else (lo <= t["tp"]):
-            return self._fill(t["symbol"], t["tp"], t["qty"], buying=not long, market_order=False, reason="TP")  # límite
+        hit_sl = (lambda lo, hi: lo <= t["sl"]) if long else (lambda lo, hi: hi >= t["sl"])
+        hit_tp = (lambda lo, hi: hi >= t["tp"]) if long else (lambda lo, hi: lo <= t["tp"])
+        for b in [*since.itertuples(index=False), None]:
+            lo, hi, first = (b.low, b.high, b.open) if b is not None else (last, last, last)
+            # Si una misma vela toca ambos niveles se asume el stop: lo conservador.
+            if hit_sl(lo, hi):
+                # Acciones: si la vela abrió ya pasado el stop, o el precio de ahora ya lo está (un hueco en la
+                # apertura o tras una parada), la orden a mercado se ejecuta ahí, no en el stop.
+                ref = first if stock and hit_sl(first, first) else t["sl"]
+                return self._fill(t["symbol"], ref, t["qty"], buying=not long, reason="SL")  # el stop es orden a mercado
+            if hit_tp(lo, hi):
+                return self._fill(t["symbol"], t["tp"], t["qty"], buying=not long, market_order=False, reason="TP")  # límite
         return None
 
     async def close(self, t: dict) -> dict:

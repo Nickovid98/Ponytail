@@ -8,7 +8,8 @@ Usa las mismas piezas que el motor en vivo: los agentes, BossAgent.decide y
 risk_manager (stop, tamaño, comisiones y deslizamiento). Sirve para comparar
 configuraciones con datos en vez de con intuición.
 
-Lo que NO reproduce: el agente macro (no hay titulares históricos), el libro de
+Lo que NO reproduce: el agente macro (no hay titulares históricos), el de escenarios
+(10.000 simulaciones por activo en cada paso harían la simulación eterna), el libro de
 órdenes, los pesos del optimizador (todos valen 1) ni los post-mortem con
 Claude (la evolución usa siempre la mutación fija).
 """

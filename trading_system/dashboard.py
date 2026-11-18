@@ -22,8 +22,15 @@ import optimizer
 from agents import AGENT_LABELS
 from utils import db, token_budget, trade_logger
 
-st.set_page_config(page_title="Mesa de bots", page_icon="👾", layout="wide")
-LAB = config.ROOT / "data" / "lab"
+from utils import risk_manager as risk
+
+FUNDED = config.FUNDED  # abierta con "Iniciar cuenta de fondeo.bat"
+st.set_page_config(page_title="Cuenta de fondeo" if FUNDED else "Mesa de bots", page_icon="👾", layout="wide")
+# Cada base de datos (tu cuenta, la de fondeo) con su registro del motor y su laboratorio: las dos apps pueden
+# estar abiertas a la vez sin pisarse.
+OWN = "" if config.DB_PATH.name == "trades_history.db" else f"_{config.DB_PATH.stem}"
+LAB = config.ROOT / "data" / f"lab{OWN}"
+MOTOR_LOG = f"motor{OWN}.txt"
 COLOR = {"LONG": "green", "SHORT": "red", "NEUTRAL": "gray"}
 ALERT_CONF = 70
 BADGE = {"analizando": ":blue[● Analizando]", "alerta": ":orange[● Alerta]", "descanso": ":gray[● Descanso]",
@@ -34,6 +41,8 @@ BOTS = {  # la cara de cada bot: icono, nombre corto y a qué se dedica
     "smc": ("🎯", "SMC", "Sigue la estructura del precio intradía: rupturas, order blocks, huecos y barridos."),
     "wyckoff": ("📊", "Wyckoff", "Estudia el volumen: dónde se negocia más y si se acumula o se distribuye."),
     "sentiment": ("🧭", "Tendencia", "Mide tendencia e impulso en 4 h y 1 día, y la presión del libro de órdenes."),
+    "scenarios": ("🎲", "Escenarios", "Simula miles de futuros ficticios de cada activo con sus propias velas y vota "
+                  "solo por las 5 apuestas con mejor resultado medio, después de costes."),
     "orb": ("🚪", "Ruptura de apertura", "Opera la primera ruptura del rango de apertura de la sesión."),
 }
 ICON = {"signal": "💬", "reward": "⭐", "trust": "🤝", "trade": "💼", "risk": "🛑", "death": "💀", "rebirth": "🟢",
@@ -155,15 +164,17 @@ def engine_switch() -> None:
         st.info("Motor arrancando…" if starting else "Motor apagado")
         if st.button("▶ Encender motor", type="primary", width="stretch", disabled=starting):
             st.session_state["starting"] = time.time()
-            procs()["engine"] = spawn(["main.py", "--child"], "motor.txt", stdin=subprocess.PIPE)
+            procs()["engine"] = spawn(["main.py", "--child"], MOTOR_LOG, stdin=subprocess.PIPE)
             st.rerun(scope="fragment")
         if p is not None and p.poll() not in (None, 0):
             st.error("El motor no pudo arrancar:")
-            st.code(tail("motor.txt", 6) or "sin mensaje", language=None)
+            st.code(tail(MOTOR_LOG, 6) or "sin mensaje", language=None)
 
 
 with st.sidebar:
     st.title("👾 Mesa de bots")
+    if FUNDED:
+        st.caption(f"**Cuenta de fondeo simulada** · {config.CAPITAL:,.0f} {config.QUOTE}")
     engine_switch()
     st.divider()
     kill = db.get_state("ctl:kill", {"on": False})
@@ -193,7 +204,8 @@ with st.sidebar:
     target = st.number_input("Tu objetivo de rentabilidad anual (%)", 5, 500, int(db.get_state("ui:target", 40)), 5)
     if target != db.get_state("ui:target", 40):
         db.set_state("ui:target", target)
-    st.caption(f"{config.EXCHANGE_ID} · comisión {config.FEE_PCT} % + deslizamiento {config.SLIPPAGE_PCT} % por lado")
+    st.caption(f"{config.EXCHANGE_ID} · comisión {config.FEE_PCT} % + deslizamiento {config.SLIPPAGE_PCT} % por lado"
+               + (f" · acciones (Yahoo): {config.STOCK_FEE_PCT} % + {config.STOCK_SLIPPAGE_PCT} %" if config.STOCKS else ""))
 
 
 # --- Piezas compartidas por lo vivo y lo simulado -----------------------------
@@ -280,9 +292,75 @@ def bot_detail(name: str, trades: list[dict], board: dict, live: bool) -> None:
 
 
 # --- 1. Sala de control ------------------------------------------------------
+def scenarios_table() -> None:
+    """Lo que ve el bot de escenarios: el mejor lado de cada activo, con sus probabilidades, y sus 5 elegidas."""
+    rk = db.get_state("scenarios:ranking")
+    st.subheader(f"🎲 Las {config.SCENARIO_TOP} mejores apuestas según {config.SCENARIOS:,} escenarios".replace(",", "."))
+    if not rk:
+        st.caption("Aparecerá cuando el motor haya hecho su primera ronda de escenarios.")
+        return
+    rows = [{"Puesto": r["rank"] or "—", "Activo": r["symbol"], "Lado": r["side"], "Objetivo primero": r["ptp"],
+             "Stop primero": r["psl"], "Sin resolver": r["popen"], "Media (R)": r["er"], "Hasta": r["horizon"]}
+            for r in rk["rows"] if "er" in r]
+    if rows:
+        st.dataframe(pd.DataFrame(rows).style.format({"Objetivo primero": "{:.0%}", "Stop primero": "{:.0%}",
+                                                      "Sin resolver": "{:.0%}", "Media (R)": "{:+.2f}"}),
+                     hide_index=True, width="stretch")
+    quiet = [f"{r['symbol']}: {r['why']}" for r in rk["rows"] if "why" in r]
+    st.caption((f"Elegidas: {', '.join(rk['top'])}. " if rk["top"] else "Ninguna apuesta tiene media positiva después "
+                "de costes: el bot no vota por nada. ") + f"Calculado {ago(rk['ts'])}. Cada escenario rehace el futuro con "
+               "velas pasadas del propio activo: repite cómo se movió hace poco, no predice."
+               + (" · " + " · ".join(quiet[:3]) if quiet else ""))
+
+
+def funded_panel(acct: dict) -> None:
+    """La cuenta de fondeo simulada: cuánto le queda hasta el kill switch de hoy y hasta perderla."""
+    total = acct.get("equity", config.CAPITAL) + acct.get("floating", 0.0)
+    floor = acct.get("floor", config.CAPITAL - config.PROP_MAX_LOSS_USD)
+    kill_at = config.PROP_DAILY_LOSS_LIMIT_USD * config.PROP_KILL_AT_PCT / 100
+    lost_today = max(0.0, -acct.get("day_pnl", 0.0))
+    history = db.get_state("fund:history", [])
+    with st.container(border=True):
+        c = st.columns(4)
+        c[0].metric("Cuenta", f"n.º {acct.get('gen', 1)}", f"{len(history)} perdidas antes", delta_color="off", delta_arrow="off")
+        c[1].metric("Saldo de esta cuenta", f"{total:,.2f}", f"{total - config.CAPITAL:+,.2f}",
+                    help="Con lo flotante de las posiciones abiertas. Cada cuenta nueva empieza en el capital inicial.")
+        c[2].metric("Suelo", f"{floor:,.2f}", f"le quedan {total - floor:,.2f}", delta_color="off", delta_arrow="off",
+                    help=f"Si el saldo llega aquí la cuenta se pierde y nace otra. Sube con el mejor cierre diario "
+                         f"(queda {config.PROP_MAX_LOSS_USD:,.0f} por debajo) y deja de subir en {config.CAPITAL:,.0f}.")
+        c[3].metric("Pérdida de hoy", f"{lost_today:,.2f}", f"kill switch a {kill_at:,.0f}", delta_color="off", delta_arrow="off",
+                    help=f"Al {config.PROP_KILL_AT_PCT:g} % del límite diario de {config.PROP_DAILY_LOSS_LIMIT_USD:,.0f} "
+                         "se cierra todo y no se opera hasta el día siguiente (UTC).")
+        if kill_at:
+            st.progress(min(1.0, lost_today / kill_at), text=f"Hoy: {lost_today:,.0f} de {kill_at:,.0f} hasta el kill switch")
+        st.progress(max(0.0, min(1.0, 1 - (total - floor) / config.PROP_MAX_LOSS_USD)),
+                    text=f"Margen hasta perder la cuenta: {total - floor:,.0f}")
+        if config.STOCKS:
+            entries, _ = risk.nyse_session()
+            state = "abierta, el jefe puede entrar" if entries else "abierta, ahora sin entradas nuevas" \
+                if risk.nyse_open_since() else "cerrada"
+            st.caption(f"Bolsa de Nueva York {state}. Acciones con velas de {config.STOCK_TIMEFRAME}: no se entra en los "
+                       f"primeros {config.STOCK_OPEN_WAIT_MIN:g} min ni en los últimos {config.STOCK_LAST_ENTRY_MIN:g}, y se "
+                       f"cierran {config.STOCK_FLAT_MIN:g} min antes del cierre (16:00, o 13:00 los días de cierre temprano). "
+                       "Cripto opera las 24 h.")
+        fund = db.get_state("fund", {})
+        if fund.get("gen", 1) > 1:
+            st.caption(f"Lo que corrige esta cuenta: {fund.get('lesson')}")
+        if history:
+            with st.expander(f"Cuentas perdidas ({len(history)})"):
+                st.dataframe(pd.DataFrame([{"Cuenta": h["gen"], "Abierta": clock(h["born"]), "Perdida": clock(h["end"]),
+                                            "Operaciones": h["n"], "Resultado": h["net"], "Corregía": h["lesson"]}
+                                           for h in history[::-1]]).style.format({"Resultado": "{:+,.2f}"}),
+                             hide_index=True, width="stretch")
+
+
 @st.fragment(run_every=5)
 def control_room() -> None:
-    if config.EXECUTION_MODE == "paper":
+    if FUNDED:
+        st.success(f"**CUENTA DE FONDEO SIMULADA** · {config.CAPITAL:,.0f} {config.QUOTE}"
+                   + (" · cripto y acciones" if config.STOCKS else "") + ", en largo y en corto · precios reales, "
+                   "ninguna orden sale de este equipo")
+    elif config.EXECUTION_MODE == "paper":
         st.success("**SIMULACIÓN CON PRECIOS REALES** · ninguna orden sale de este equipo")
     elif config.EXECUTION_MODE == "sandbox":
         st.warning("**SANDBOX DEL EXCHANGE** · órdenes reales con fondos de prueba")
@@ -292,9 +370,9 @@ def control_room() -> None:
     if engine_alive() and failed:
         st.warning(f"El jefe no pudo completar su último ciclo ({ago(failed['ts'])}): {failed['error']}. Lo reintenta solo "
                    "cada pocos segundos y mientras tanto no opera ni vigila los stops simulados. Si se repite, el detalle "
-                   "está en data/motor.txt.")
+                   f"está en data/{MOTOR_LOG}.")
     elif engine_alive() and hb and time.time() - hb > 3 * config.BOSS_INTERVAL + 30:
-        st.warning(f"El motor está encendido pero el jefe lleva sin completar un ciclo desde {ago(hb)}. Mira data/motor.txt.")
+        st.warning(f"El motor está encendido pero el jefe lleva sin completar un ciclo desde {ago(hb)}. Mira data/{MOTOR_LOG}.")
 
     acct, boss = db.get_state("account", {}), db.get_state(f"boss:{symbol}", {})
     opened, closed = trade_logger.open_trades(), trade_logger.closed_trades(mode=config.EXECUTION_MODE)
@@ -311,9 +389,11 @@ def control_room() -> None:
                 help="Acertar muchas no es ganar dinero: cuenta cuánto se gana en las buenas y se pierde en las malas.")
     k[4].metric("Hoy", f"{acct.get('day_pnl', 0):+,.2f}")
     k[5].metric("Costes pagados", f"{p['costs']:,.2f}", help="Comisiones y deslizamiento acumulados.")
-    st.caption(verdict(p, target))
+    st.caption(verdict(p, target) + (" El resultado neto suma todas las cuentas; el de la actual, en el panel." if FUNDED else ""))
     if acct.get("blocked"):
         st.error(f"Entradas nuevas bloqueadas: {acct['blocked']}")
+    if FUNDED:
+        funded_panel(acct)
 
     left, right = st.columns([3, 2])
     with left:
@@ -334,6 +414,8 @@ def control_room() -> None:
                 if st.button("Aprobar y ejecutar", type="primary"):
                     db.set_state(f"approve:{symbol}", time.time())
                     st.toast("Aprobada: se ejecuta en el próximo ciclo si la señal sigue vigente.")
+        if "scenarios" in AGENT_LABELS:
+            scenarios_table()
         st.subheader("Resultado acumulado")
         if closed:
             # Empieza en cero al abrirse la primera operación: con un solo cierre ya se ve una línea.
@@ -505,7 +587,7 @@ def lab_status() -> None:
     if p is not None and p.poll() is None:
         running = True
         st.info("Simulando… puedes cambiar de pestaña; el resultado aparecerá aquí.")
-        st.code(tail("lab/sim.txt", 6) or "descargando velas…", language=None)
+        st.code(tail(f"lab{OWN}/sim.txt", 6) or "descargando velas…", language=None)
         if st.button("Cancelar simulación"):
             p.terminate()
     elif p is not None and procs().get("sim_seen") is not p:
@@ -513,9 +595,9 @@ def lab_status() -> None:
         st.rerun()  # terminó: se repinta todo una vez y se deja de consultar
     if p is not None and not running and p.returncode != 0:
         st.error("La simulación no terminó bien:")
-        st.code(tail("lab/sim.txt", 12), language=None)
+        st.code(tail(f"lab{OWN}/sim.txt", 12), language=None)
     elif not running and procs().get("sim_text"):
-        st.code(tail("lab/sim.txt", 60), language=None)  # validación fuera de muestra: el informe es texto
+        st.code(tail(f"lab{OWN}/sim.txt", 60), language=None)  # validación fuera de muestra: el informe es texto
     elif not running and sim_result():
         show_sim(sim_result())
 
@@ -533,7 +615,7 @@ def lab() -> None:
         strategy = c[1].radio("Quién opera", ["Los bots en equipo", "Ruptura del rango de apertura (solo acciones)"])
         evolution = c[1].toggle("Con selección natural", value=True,
                                 help="Un bot muere cuando falla y nace un sucesor con la lección aprendida.")
-        funded = c[1].toggle("Reglas de cuenta fondeada", value=False,
+        funded = c[1].toggle("Reglas de cuenta fondeada", value=FUNDED,
                              help="El equipo queda eliminado al perder el máximo y otro empieza con capital nuevo.")
         max_loss = c[1].number_input("Pérdida máxima de la cuenta fondeada", 100, 100000, 2000, 100)
         walk = c[1].toggle("Entrenar y examinar", value=False, help="Solo con la ruptura de apertura: elige la mejor "
@@ -552,9 +634,14 @@ def lab() -> None:
                    "DECISION_THRESHOLD": str(threshold), "REWARD_RISK": str(rr), "STRATEGY": "orb" if orb else "ensemble"}
             if symbols.strip() or stocks:
                 env["SYMBOLS"] = symbols.strip().upper() or "NVDA,META,GOOGL,TTWO,MU,MSFT,UBER"
+            else:  # cripto: solo los pares de cripto de la configuración (la de fondeo también lleva acciones)
+                env["SYMBOLS"] = ",".join(s for s in config.SYMBOLS if "/" in s) or "BTC/USDT:USDT,ETH/USDT:USDT"
             if stocks:
                 env |= {"EXCHANGE_ID": "yahoo", "QUOTE": "USD", "SMC_TIMEFRAME": "1h", "ATR_TIMEFRAME": "1h",
                         "WYCKOFF_TIMEFRAME": "1h", "FEE_PCT": "0.005", "SLIPPAGE_PCT": "0.02", "MIN_AGENTS": "1" if orb else "3"}
+            # Sin reglas de fondeo no hay límite diario en dólares, aunque la app sea la de la cuenta de fondeo:
+            # la simulación hereda el entorno de la app y, si no, arrastraría su kill switch.
+            env |= {"PROP_DAILY_LOSS_LIMIT_USD": "0", "PROP_MAX_LOSS_USD": "0"}  # el backtest lleva su propio --lineage
             if funded or walk:
                 env |= {"TOTAL_LOSS_LIMIT_USD": "0", "PROP_DAILY_LOSS_LIMIT_USD": str(max_loss / 2)}
             args = ["backtest.py", "--days", str(days)] + (["--evolution"] if evolution and not orb else [])
@@ -562,7 +649,7 @@ def lab() -> None:
             args += ["--walk-forward", "180,60"] if walk and orb else ["--save", str(LAB / "sim.json")]
             LAB.mkdir(parents=True, exist_ok=True)
             (LAB / "sim.json").unlink(missing_ok=True)
-            procs().update(sim=spawn(args, "lab/sim.txt", env), sim_text=walk and orb)
+            procs().update(sim=spawn(args, f"lab{OWN}/sim.txt", env), sim_text=walk and orb)
             st.rerun()
     running = procs().get("sim") is not None and procs()["sim"].poll() is None
     st.fragment(run_every=2 if running else None)(lab_status)()
@@ -590,9 +677,14 @@ def settings() -> None:
                 trade_logger.log_event("params", "boss", f"Ajustes cambiados por ti: {changed}")
             st.toast("Guardado: el motor lo aplica en su próximo ciclo." if changed else "No había nada que cambiar.")
             st.rerun()
-        st.caption(f"Solo se cambian en el archivo .env, a propósito: stop máximo {config.MAX_SL_PCT:g} %, límite de pérdida "
-                   f"diaria {config.DAILY_LOSS_LIMIT_PCT:g} %, límite de pérdida total {config.TOTAL_LOSS_LIMIT_USD:g} {config.QUOTE} "
-                   f"y el paso a dinero real (ahora: {config.EXECUTION_MODE}).")
+        if FUNDED:
+            st.caption(f"Reglas de la cuenta de fondeo, fijas en «Iniciar cuenta de fondeo.bat»: stop máximo {config.MAX_SL_PCT:g} %, "
+                       f"pérdida diaria {config.PROP_DAILY_LOSS_LIMIT_USD:,.0f} con kill switch al {config.PROP_KILL_AT_PCT:g} %, "
+                       f"la cuenta se pierde {config.PROP_MAX_LOSS_USD:,.0f} bajo su mejor cierre diario, y siempre simulada.")
+        else:
+            st.caption(f"Solo se cambian en el archivo .env, a propósito: stop máximo {config.MAX_SL_PCT:g} %, límite de pérdida "
+                       f"diaria {config.DAILY_LOSS_LIMIT_PCT:g} %, límite de pérdida total {config.TOTAL_LOSS_LIMIT_USD:g} {config.QUOTE} "
+                       f"y el paso a dinero real (ahora: {config.EXECUTION_MODE}).")
     with right:
         st.subheader("Qué tienes conectado")
         for ok, what, why in (

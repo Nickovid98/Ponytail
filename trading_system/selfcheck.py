@@ -237,7 +237,7 @@ async def check_lifecycle():
     assert gens() == {2} and all(evo.alive(a) for a in AGENT_LABELS)  # ...y renacen como v2
     rule = evo.active["smc"]["rules"][0]
     assert (rule["feature"], rule["op"], rule["value"], rule["direction"], rule["penalty"]) == ("conf", "<", 85, "LONG", 15)
-    assert sum("BOT_DEATH" in n for n in notes) == 5 and sum("REBIRTH" in n for n in notes) == 5
+    assert sum("BOT_DEATH" in n for n in notes) == len(AGENT_LABELS) == sum("REBIRTH" in n for n in notes)
     assert any("SMC_Scalper_v1 → SMC_Scalper_v2" in n for n in notes)
 
     publish()  # la v2 aplica la lección: la misma señal llega con menos confianza
@@ -687,7 +687,7 @@ async def check_app():
             return db.get_state(f"boss:{SYM}")
 
         # Banquillo: el jefe no cuenta el voto de un bot apartado, y ese bot ni analiza ni deja señal.
-        db.set_state("ctl:bench", ["smc", "wyckoff", "sentiment"])
+        db.set_state("ctl:bench", ["smc", "wyckoff", "sentiment", "scenarios"])
         b = await cycle()
         assert b["action"] == "NEUTRAL" and "solo 2 agentes" in b["reason"] and set(b["votes"]) == {"historian", "macro"}, b
 
@@ -1251,10 +1251,515 @@ async def check_topstepx():
     logging.getLogger().removeHandler(cap)
 
 
+async def check_scenarios():
+    """El bot de escenarios: miles de futuros ficticios por activo, el lado bueno según la tendencia, nada si no hay
+    ventaja tras costes, solo las 5 mejores apuestas y en orden, los mismos escenarios con los mismos datos, y en
+    acciones velas de la misma hora de sesiones completas anteriores."""
+    from agents import scenario_agent
+    from agents.scenario_agent import ScenarioAgent
+    snap = {k: getattr(config, k) for k in ("SYMBOLS", "SCENARIOS", "SCENARIO_TOP", "SCENARIO_HOURS", "FEE_PCT",
+                                            "SLIPPAGE_PCT", "REWARD_RISK", "ATR_SL_MULT", "BROKER", "STOCK_FLAT_MIN")}
+    real = risk.nyse_open_since, risk.nyse_hours
+    config.SCENARIOS, config.SCENARIO_TOP, config.SCENARIO_HOURS, config.BROKER = 4000, 5, 6, "ccxt"
+    config.FEE_PCT, config.SLIPPAGE_PCT, config.REWARD_RISK, config.ATR_SL_MULT = 0.075, 0.02, 2.0, 1.5
+    gen = np.random.default_rng(3)
+
+    def crypto(drift, n=1200, noise=0.0015):  # velas de 5 min ya cerradas, la última hace 5 min
+        c = 100 * np.exp(np.cumsum(drift + gen.normal(0, noise, n)))
+        o = np.r_[c[0], c[:-1]]
+        ts = pd.to_datetime(time.time() - 600 - 300 * np.arange(n)[::-1], unit="s", utc=True)
+        return pd.DataFrame({"ts": ts, "open": o, "high": np.maximum(o, c) * 1.0008, "low": np.minimum(o, c) * 0.9992,
+                             "close": c, "volume": 1.0})
+
+    def sessions(drift, days, noise=0.001):  # sesiones completas de 78 velas, de 09:30 a 16:00 en Nueva York
+        today, out, d = dt.datetime.now(risk.NEW_YORK).date(), [], 1
+        while len(out) < days:
+            day = today - dt.timedelta(days=d)
+            d += 1
+            if day.weekday() >= 5:
+                continue
+            start = dt.datetime.combine(day, dt.time(9, 30), risk.NEW_YORK)
+            c = 100 * np.exp(np.cumsum(drift + gen.normal(0, noise, 78)))
+            o = np.r_[c[0], c[:-1]]
+            out.append(pd.DataFrame({"ts": pd.date_range(start, periods=78, freq="5min").tz_convert("UTC"), "open": o,
+                                     "high": np.maximum(o, c) * 1.0005, "low": np.minimum(o, c) * 0.9995, "close": c,
+                                     "volume": 1.0}))
+        return pd.concat(out[::-1], ignore_index=True)
+
+    class Scen:
+        def __init__(self, data, broken=()):
+            self.data, self.broken = data, set(broken)
+
+        async def ohlcv(self, symbol, tf, limit=300):
+            if symbol in self.broken:
+                raise ConnectionError("sin datos")
+            return self.data[symbol].tail(limit)
+
+        async def price(self, symbol):
+            return float(self.data[symbol].close.iloc[-1])
+
+    try:
+        # 1) Sube, baja o se queda quieto: el lado bueno, y nada cuando los costes se comen la ventaja.
+        config.SYMBOLS = ["UP/USDT", "DOWN/USDT", "FLAT/USDT"]
+        mk = Scen({"UP/USDT": crypto(0.0012), "DOWN/USDT": crypto(-0.0012), "FLAT/USDT": crypto(0.0)})
+        a = ScenarioAgent()
+        rows = {r["symbol"]: r for r in await a.rank(mk)}
+        up, down, flat = [await a.run(s, mk) for s in config.SYMBOLS]
+        assert up.direction == "LONG" and up.confidence >= 50 and "puesto" in up.rationale, up
+        assert down.direction == "SHORT" and rows["DOWN/USDT"]["er"] > 0, down
+        assert flat.direction == "NEUTRAL" and rows["FLAT/USDT"]["er"] <= 0 and "fuera de las 5" in flat.rationale, flat
+        assert "4.000 escenarios (6 h)" in up.rationale and up.features["rank"] in (1.0, 2.0)
+        assert db.get_state("scenarios:ranking")["top"] == [r["symbol"] for r in rows.values() if r["rank"]]
+        # Los mismos datos dan los mismos escenarios; más costes, peor resultado.
+        a._at = 0
+        assert {r["symbol"]: r["er"] for r in await a.rank(mk)} == {s: r["er"] for s, r in rows.items()}
+        config.FEE_PCT = 0.5
+        a._at = 0
+        assert next(r for r in await a.rank(mk) if r["symbol"] == "UP/USDT")["er"] < rows["UP/USDT"]["er"]
+        config.FEE_PCT = 0.075
+        # 2) Siete activos que suben: solo vota por los 5 que más prometen, en orden. Un activo sin datos no
+        #    tumba a los demás: ese falla como fallo pasajero.
+        config.SYMBOLS = [f"S{i}/USDT" for i in range(7)] + ["MAL/USDT"]
+        mk = Scen({f"S{i}/USDT": crypto(0.0004 * (i + 1)) for i in range(7)}, broken={"MAL/USDT"})
+        a = ScenarioAgent()
+        rows = [r for r in await a.rank(mk) if "er" in r]
+        votes = {s: await a.run(s, mk) for s in config.SYMBOLS[:7]}
+        best5 = [r["symbol"] for r in sorted(rows, key=lambda r: -r["er"])[:5]]
+        assert sorted(s for s, v in votes.items() if v.direction == "LONG") == sorted(best5), (votes, rows)
+        assert [int(votes[s].features["rank"]) for s in best5] == [1, 2, 3, 4, 5]  # puestos por resultado medio
+        assert all(v.direction == "NEUTRAL" for s, v in votes.items() if s not in best5)
+        assert {"S5/USDT", "S6/USDT"} <= set(best5) and "S0/USDT" not in best5  # los que más suben, dentro
+        try:
+            await a.run("MAL/USDT", mk)
+            raise AssertionError("debió fallar")
+        except ConnectionError as e:
+            assert isinstance(e, engine.TRANSIENT)
+        # 3) La cuenta de cada escenario: siempre +1 % por vela. El largo llega al objetivo y el corto a su stop.
+        price, atr_v = 100.0, 1.0
+        up_bar = np.tile(np.array([1.0, 1.01, 0.9999, 1.01]), (1000, 20, 1))
+        out = ScenarioAgent.outcomes(price, atr_v, up_bar, "X/USDT")
+        dist, cost = 1.5, 100 * 2 * (0.075 + 0.02) / 100
+        assert out["LONG"]["ptp"] == 1 and abs(out["LONG"]["er"] - (2 * dist - cost) / (dist + cost)) < 1e-12, out
+        assert out["SHORT"]["psl"] == 1 and out["SHORT"]["er"] == -1.0
+        both = np.tile(np.array([1.0, 1.04, 0.96, 1.0]), (1000, 5, 1))  # una vela que toca los dos niveles
+        assert ScenarioAgent.outcomes(price, atr_v, both, "X/USDT")["LONG"]["psl"] == 1
+        # 4) Acciones: con la bolsa cerrada no simula; con menos de 20 sesiones completas tampoco; con ellas,
+        #    cada tramo sale de la misma hora del día (±2 velas) y el escenario acaba antes del cierre.
+        config.SYMBOLS = ["NVDA", "META"]
+        mk = Scen({"NVDA": sessions(0.0008, 25), "META": sessions(0.0008, 12)})
+        risk.nyse_open_since = lambda now=None: None
+        a = ScenarioAgent()
+        await a.rank(mk)
+        assert "cerrada" in (await a.run("NVDA", mk)).rationale
+        opens = dt.datetime.now(risk.NEW_YORK) - dt.timedelta(hours=2)
+        risk.nyse_open_since = lambda now=None: opens.timestamp()
+        risk.nyse_hours = lambda t: (opens, opens + dt.timedelta(hours=6, minutes=30))
+        a = ScenarioAgent()
+        await a.rank(mk)
+        nvda, meta = await a.run("NVDA", mk), await a.run("META", mk)
+        assert nvda.direction == "LONG" and "hasta las" in nvda.rationale, nvda
+        assert meta.direction == "NEUTRAL" and "solo 12 sesiones" in meta.rationale, meta
+        # Un medio día (cierre temprano) y las velas de hoy no entran en los escenarios: solo sesiones completas.
+        half = dt.datetime.combine(dt.date(2026, 7, 2), dt.time(9, 30), risk.NEW_YORK)
+        today = dt.datetime.combine(dt.datetime.now(risk.NEW_YORK).date(), dt.time(9, 30), risk.NEW_YORK)
+        extra = [pd.DataFrame({"ts": pd.date_range(t0, periods=n, freq="5min").tz_convert("UTC"), "open": 100.0,
+                               "high": 101.0, "low": 99.0, "close": 100.0, "volume": 1.0}) for t0, n in ((half, 42), (today, 10))]
+        pools, _ = ScenarioAgent.stock_pools(pd.concat([mk.data["NVDA"], *extra]).sort_values("ts"))
+        marked = {i: np.full((3, 4), float(i)) for i in range(1, scenario_agent.SESSION_BARS)}
+        picked = set(ScenarioAgent._draw(np.random.default_rng(0), marked, 10)[:, 0])
+        assert len(pools) == 77 and all(len(p) == 25 for p in pools.values()) and picked <= {8.0, 9.0, 10.0, 11.0, 12.0}
+    finally:
+        risk.nyse_open_since, risk.nyse_hours = real
+        for k, v in snap.items():
+            setattr(config, k, v)
+        db.del_state("scenarios:ranking")
+
+
+async def check_funded():
+    """Acciones con precios de Yahoo y la cuenta de fondeo simulada: horario de Nueva York, costes y acciones
+    enteras, datos sin red, entra primero la señal más fuerte, cierre antes del cierre de la bolsa y en la
+    apertura de lo que quedó abierto, suelo que sigue al mejor cierre diario, margen hasta el kill switch,
+    cuenta perdida aunque rebote, y relevo de cuenta con su lección."""
+    # Parte de valores conocidos (la comprobación de Topstep deja los suyos) y lo deja todo como estaba.
+    snap = {k: v for k, v in vars(config).items() if k.isupper()}
+    for k, v in dict(BROKER="ccxt", EXECUTION_MODE="paper", FEE_PCT=0.075, SLIPPAGE_PCT=0.02, MIN_NOTIONAL=10.0,
+                     MAX_LEVERAGE=3.0, MAX_TRADES_PER_DAY=0, MIN_ORDER_GAP_S=0.0, PROP_KILL_AT_PCT=75.0,
+                     PROP_ACCOUNT_FLOOR_USD=0.0, RISK_PER_TRADE_PCT=1.0, ATR_SL_MULT=1.5, REWARD_RISK=2.0,
+                     DECISION_THRESHOLD=0.25, MIN_AGENTS=3, ATR_TIMEFRAME="15m", MAX_SL_PCT=5.0, STOCK_FEE_PCT=0.005,
+                     STOCK_SLIPPAGE_PCT=0.02, STOCK_OPEN_WAIT_MIN=60.0, STOCK_LAST_ENTRY_MIN=30.0, STOCK_FLAT_MIN=5.0,
+                     STOCK_TIMEFRAME="1h", PROP_MAX_LOSS_USD=0.0, FUNDED=False).items():
+        setattr(config, k, v)
+    try:
+        await _check_funded()
+    finally:
+        for k, v in snap.items():
+            setattr(config, k, v)
+
+
+async def _check_funded():
+    import requests
+    from utils import exchange
+    from agents.smc_agent import SMCAgent
+    from agents.wyckoff_agent import WyckoffAgent
+    u = lambda *a: dt.datetime(*a, tzinfo=dt.timezone.utc)
+    # 1) Qué es una acción y su horario. Lunes 16-11-2026: Nueva York va 5 h por detrás de UTC hasta marzo.
+    assert risk.is_stock("NVDA") and not risk.is_stock(SYM) and not risk.is_stock("BTC/USD")
+    config.BROKER = "topstepx"
+    assert not risk.is_stock("MNQ")  # en Topstep un símbolo sin "/" es un contrato de futuros
+    config.BROKER = "ccxt"
+    S = risk.nyse_session
+    assert S(u(2026, 11, 16, 15, 0)) == (False, False)  # 10:00: aún no cerró la primera vela de 1 h
+    assert S(u(2026, 11, 16, 15, 31)) == (True, False)  # 10:31
+    assert S(u(2026, 11, 16, 20, 31)) == (False, False)  # 15:31: la última media hora no se entra
+    assert S(u(2026, 11, 16, 20, 55)) == (False, True)  # 15:55: se cierra todo
+    for closed in (u(2026, 11, 16, 13, 0), u(2026, 11, 16, 21, 30), u(2026, 11, 21, 15, 30), u(2026, 11, 26, 15, 30)):
+        assert S(closed) == (False, False) and risk.nyse_open_since(closed) is None  # antes, después, sábado, festivo
+    assert risk.nyse_open_since(u(2026, 11, 16, 15, 0)) == u(2026, 11, 16, 14, 30).timestamp()
+    assert S(u(2026, 11, 27, 17, 0)) == (True, False) and S(u(2026, 11, 27, 17, 55)) == (False, True)  # cierra a las 13:00
+    assert S(u(2027, 3, 15, 14, 45)) == (True, False) and S(u(2027, 3, 12, 14, 45)) == (False, False)  # horario de verano
+
+    # 2) Costes de acciones (0,005 % + 0,02 % por lado) en el tamaño, y acciones enteras, siempre hacia abajo.
+    p = risk.build_plan("LONG", 100.0, 1.0, 50000, symbol="NVDA")
+    assert abs(p["cost_est"] / p["qty"] - 0.05) < 1e-12 and abs(p["risk_usd"] - 500) < 1e-9, p  # cripto: 0,19
+    c = risk.build_plan("LONG", 100.0, 1.0, 50000)
+    assert abs(c["cost_est"] / c["qty"] - 0.19) < 1e-12
+    fm = FakeMarket()
+    pb = PaperBroker(fm)
+    f = await pb.open("NVDA", "LONG", 129.9, 98.0, 104.0, 100.0)
+    assert f["qty"] == 129.0 and abs(f["price"] - 100.02) < 1e-9 and abs(f["fee"] - 100.02 * 129 * 0.00005) < 1e-9, f
+    assert (await pb.open(SYM, "LONG", 0.7, 98.0, 104.0, 100.0))["qty"] == 0.7  # cripto: fracciones
+    try:
+        await pb.open("NVDA", "LONG", 0.7, 98.0, 104.0, 100.0)
+        raise AssertionError("menos de una acción no se compra")
+    except ValueError:
+        pass
+    # Un stop de acciones que salta con un hueco se ejecuta donde abrió la vela, no en el stop; en cripto, en el stop.
+    gap = {"symbol": "NVDA", "side": "LONG", "qty": 10.0, "sl": 98.0, "tp": 104.0, "opened_ts": time.time() - 600}
+    fm.p = 95.0
+    res = await pb.check_exit(gap)
+    assert res["reason"] == "SL" and abs(res["price"] - 95.0 * 0.9998) < 1e-9, res
+    assert abs((await pb.check_exit(gap | {"symbol": SYM}))["price"] - 98.0 * 0.9998) < 1e-9
+
+    class NoBars(FakeMarket):  # en la apertura aún no hay vela cerrada: solo el precio de ahora ve el hueco
+        async def ohlcv(self, symbol, tf, limit=300):
+            return self.df.iloc[0:0]
+
+    nb = NoBars()
+    nb.p = 95.0
+    assert abs((await PaperBroker(nb).check_exit(gap))["price"] - 95.0 * 0.9998) < 1e-9
+    # Tras un apagado de 20 h, el stop que se tocó hace 19 h y luego se recuperó también cuenta (velas de 5 min).
+    old = time.time() - 20 * 3600
+
+    class Downtime(FakeMarket):
+        asked = []
+
+        async def ohlcv(self, symbol, tf, limit=300):
+            self.asked.append(tf)
+            ts = pd.to_datetime([old + 3600, old + 3900], unit="s", utc=True)
+            return pd.DataFrame({"ts": ts, "open": 100.0, "high": 100.5, "low": [97.0, 99.5], "close": 100.0,
+                                 "volume": 1.0})
+
+    dm = Downtime()
+    dm.p = 101.0
+    res = await PaperBroker(dm).check_exit(gap | {"symbol": SYM, "opened_ts": old})
+    assert res and res["reason"] == "SL" and dm.asked == ["5m"], (res, dm.asked)
+    fm.p = 100.0
+
+    # 3) Datos de Yahoo sin red: velas vacías y la vela en curso fuera, 4 h desde 1 h, último precio, caché, y
+    #    cualquier fallo (también un formato raro o un 429) como ConnectionError: el motor lo trata como pasajero.
+    calls, old_symbols, old_ex = [], config.SYMBOLS, config.EXCHANGE_ID
+    base = int(time.time()) // 3600 * 3600 - 12 * 3600
+
+    def fake(symbol, interval, span):
+        calls.append((symbol, interval, span))
+        if symbol == "ZZZZ":
+            return 404, {"chart": {"result": None, "error": {"code": "Not Found"}}}
+        if symbol == "LENTO":
+            raise requests.ConnectionError("sin red")
+        if symbol == "RARO":
+            return 200, {"chart": {"result": [{"meta": {}, "timestamp": [1], "indicators": {"quote": [{}]}}]}}
+        if symbol == "SINPRECIO":
+            return 200, {"chart": {"result": [{"meta": {"regularMarketPrice": None}}]}}
+        if symbol == "MUCHAS":
+            return 429, {}
+        closes = [100.0 + i for i in range(11)]
+        closes[3] = None  # una vela sin negocio
+        return 200, {"chart": {"result": [{"meta": {"regularMarketPrice": 109.5},
+                                           # 10 velas cerradas de 1 h y la que está en curso (empezó hace un minuto)
+                                           "timestamp": [base + 3600 * i for i in range(10)] + [int(time.time()) - 60],
+                                           "indicators": {"quote": [{
+                                               "open": closes, "close": closes, "volume": [1000] * 11,
+                                               "high": [c and c + 1 for c in closes], "low": [c and c - 1 for c in closes]}]}}]}}
+
+    real_get, exchange._yahoo_get = exchange._yahoo_get, fake
+    try:
+        m = Market()
+        df = await m.ohlcv("NVDA", "1h", 5)
+        assert list(df.close) == [105, 106, 107, 108, 109] and str(df.ts.dt.tz) == "UTC", df  # sin la vela en curso
+        full = await m.ohlcv("NVDA", "1h", 50)
+        assert len(full) == 9 and 103.0 not in set(full.close) and ("NVDA", "1h", "1y") in calls
+        n = len(calls)
+        h4 = await m.ohlcv("NVDA", "4h", 300)  # sale de las de 1 h, ya en caché: ni una petición más
+        now = pd.Timestamp.now(tz="UTC")
+        assert len(calls) == n and 0 < len(h4) < 9 and h4.low.min() == 99 and (h4.ts + pd.Timedelta(hours=4) <= now).all()
+        assert await m.price("NVDA") == 109.5 and calls[-1] == ("NVDA", "1d", "1d")
+        for bad in ("ZZZZ", "LENTO", "RARO", "SINPRECIO"):
+            for ask in (m.ohlcv(bad, "5m", 10), m.price(bad)):
+                try:
+                    await ask
+                    raise AssertionError(bad)
+                except ConnectionError as e:
+                    assert isinstance(e, engine.TRANSIENT)
+        try:
+            await m.ohlcv("MUCHAS", "5m", 10)
+            raise AssertionError("429")
+        except ConnectionError:
+            n = len(calls)
+        try:  # tras un 429 no se insiste: la siguiente petición ni sale
+            await m.ohlcv("META", "5m", 10)
+            raise AssertionError("pausa tras el 429")
+        except ConnectionError:
+            assert len(calls) == n
+        exchange._yahoo_pause = 0.0
+        try:
+            await m.book_imbalance("NVDA")
+            raise AssertionError("las acciones no tienen libro")
+        except NotImplementedError:
+            pass
+        # Los bots de estructura y volumen piden velas de 1 h para las acciones.
+        seen = []
+
+        class Spy:
+            async def ohlcv(self, symbol, tf, limit=300):
+                seen.append((symbol, tf))
+                return await m.ohlcv("NVDA", "1h", limit)
+
+        await SMCAgent().run("NVDA", Spy())
+        await WyckoffAgent().run("NVDA", Spy())
+        assert seen == [("NVDA", "1h"), ("NVDA", "1h")], seen
+        await m.close()
+        config.SYMBOLS = ["NVDA", "LENTO"]
+        only = Market()
+        assert only.ex is None  # solo acciones: ni se crea el exchange
+        await only.start()  # un fallo pasajero al arrancar no impide arrancar
+        config.SYMBOLS = ["NVDA", "ZZZZ"]
+        try:
+            await only.start()
+            raise AssertionError("símbolo desconocido")
+        except SystemExit as e:
+            assert "ZZZZ" in str(e)
+        await only.close()
+        config.EXCHANGE_ID, config.SYMBOLS = "alpaca", ["BTC/USD", "NVDA"]
+        ex = make_exchange()
+        assert set(ex.markets) == {"BTC/USD"}  # Alpaca solo declara lo que es cripto
+        await ex.close()
+    finally:
+        exchange._yahoo_get, exchange._yahoo_pause = real_get, 0.0
+        config.SYMBOLS, config.EXCHANGE_ID = old_symbols, old_ex
+
+    # 4) El jefe con una cuenta de fondeo de 50.000: 0,4 % de riesgo, límite diario 1.000 (kill switch al 75 %)
+    #    y la cuenta se pierde 2.000 bajo su mejor cierre diario.
+    real = risk.nyse_session, risk.nyse_open_since, risk.trading_day
+    hours, day = {"s": (True, False), "since": time.time() - 3600}, {"d": "2026-11-16"}
+    risk.nyse_session = lambda now=None: hours["s"]
+    risk.nyse_open_since = lambda now=None: hours["since"]
+    risk.trading_day = lambda now=None: day["d"]
+    try:
+        config.EXECUTION_MODE, config.SYMBOLS = "fondeo", ["AAA/USDT", "NVDA", "BBB/USDT"]
+        config.CAPITAL, config.RISK_PER_TRADE_PCT, config.PROP_MAX_LOSS_USD, config.FUNDED = 50000.0, 0.4, 2000.0, True
+        config.PROP_DAILY_LOSS_LIMIT_USD, config.TOTAL_LOSS_LIMIT_USD = 1000.0, 0.0
+        config.MAX_OPEN_POSITIONS, config.COOLDOWN_S = 1, 0
+        for key in ("ctl:kill", "ctl:bench", "ctl:params", "fund", "fund:history", "order:fails", "order:last_attempt",
+                    "weights", "account"):
+            db.del_state(key)
+        db.set_state("ctl:mode", "AUTO")
+        db.set_state("ctl:auto_opt", False)
+        class Spy(FakeMarket):  # apunta qué velas se piden y deja fallar el precio de un activo
+            asked, broken = [], set()
+
+            async def price(self, symbol):
+                if symbol in self.broken:
+                    raise ConnectionError("Yahoo no responde")
+                return await super().price(symbol)
+
+            async def ohlcv(self, symbol, tf, limit=300):
+                self.asked.append((symbol, tf))
+                if symbol in self.broken:
+                    raise ConnectionError("Yahoo no responde")
+                return await super().ohlcv(symbol, tf, limit)
+
+        fm, notes = Spy(), []
+        broker = PaperBroker(fm)
+        boss = BossAgent(fm, broker, {n: 600 for n in AGENT_LABELS}, None, notes.append)
+        status = lambda s: db.get_state(f"boss:{s}")["status"]
+        acct = lambda: db.get_state("account")
+
+        def say(symbol, direction, conf):
+            for name in AGENT_LABELS:
+                db.set_state(f"signal:{name}:{symbol}", token_budget.pack(
+                    Signal(agent=name, symbol=symbol, direction=direction, confidence=conf, rationale="prueba")))
+
+        def book(pnl):  # una operación ya cerrada con ese resultado neto
+            trade_logger.log_open("CCC/USDT", "LONG", 1.0, 100.0, 90.0, 120.0, 0.5, {})
+            trade_logger.log_close(trade_logger.open_trades()[-1], 100.0 + pnl, "TP")
+
+        # La base de datos ya tenía resultados: la cuenta 1 empieza igual en 50.000.
+        book(300)
+        say("AAA/USDT", "LONG", 60)
+        say("NVDA", "SHORT", 90)
+        await boss.tick()
+        assert await broker.equity() == 50000 and db.get_state("fund")["base"] == 300
+        assert acct()["equity"] == 50000 and acct()["day_pnl"] == 0, acct()  # sin resultado fantasma el primer día
+        # Con un hueco, entra la señal más fuerte aunque vaya segunda en la lista. Acciones enteras.
+        (t,) = trade_logger.open_trades()
+        assert t["symbol"] == "NVDA" and t["side"] == "SHORT" and t["qty"] == 129.0, t  # 200 / (1,5 + 0,05) = 129,03
+        assert status("AAA/USDT") == "máximo de posiciones abiertas" and acct()["gen"] == 1 and acct()["floor"] == 48000
+        assert ("NVDA", "1h") in fm.asked and ("NVDA", "15m") not in fm.asked  # el stop de una acción, con velas de 1 h
+        # Sin precio de la acción, el ciclo sigue: la posición conserva su último precio y todo lo demás corre.
+        await boss.tick()
+        fm.broken.add("NVDA")
+        beat = db.get_state("heartbeat")
+        await boss.tick()
+        assert db.get_state("heartbeat") > beat and acct()["marks"][str(t["id"])][0] == 100.0
+        assert [x["symbol"] for x in trade_logger.open_trades()] == ["NVDA"]
+        fm.broken.clear()
+        # Bolsa cerrada (el motor estuvo apagado al cierre): la acción sigue abierta, no hay precio al que cerrarla...
+        hours["s"], hours["since"] = (False, False), None
+        say("AAA/USDT", "NEUTRAL", 0)
+        await boss.tick()
+        assert [t["symbol"] for t in trade_logger.open_trades()] == ["NVDA"]
+        assert status("NVDA") == "posición ya abierta"
+        # ...y se cierra en cuanto abre la bolsa, aunque falten horas para el cierre.
+        hours["s"], hours["since"] = (False, False), time.time() + 1
+        await boss.tick()
+        c = trade_logger.closed_trades(mode="fondeo")[-1]
+        assert not trade_logger.open_trades() and c["symbol"] == "NVDA" and c["exit_reason"] == "SESION", c
+        # 15:55: la acción abierta hoy se cierra y no se abre otra; cripto sigue su curso.
+        hours["s"], hours["since"] = (True, False), time.time() - 3600
+        await boss.tick()
+        assert trade_logger.open_trades()[0]["symbol"] == "NVDA"
+        hours["s"] = (False, True)
+        await boss.tick()
+        assert not trade_logger.open_trades() and status("NVDA").startswith("bolsa de Nueva York cerrada")
+        assert trade_logger.closed_trades(mode="fondeo")[-1]["exit_reason"] == "SESION"
+        say("NVDA", "NEUTRAL", 0)
+        # El suelo sigue al mejor cierre diario (el último saldo de cada día) y deja de subir en el capital inicial.
+        eq0 = await broker.equity()
+        book(1500)
+        await boss.tick()  # último ciclo del día 16
+        day["d"] = "2026-11-17"
+        book(-100)  # lo que pase al empezar el día 17 no cambia el cierre del 16
+        await boss.tick()
+        assert abs(acct()["floor"] - (eq0 + 1500 - 2000)) < 1e-6, acct()
+        book(1000)
+        await boss.tick()
+        day["d"] = "2026-11-18"
+        await boss.tick()
+        assert acct()["floor"] == 50000 and abs(acct()["peak"] - (eq0 + 2400)) < 1e-6, acct()
+        # Un mal día: el saldo baja a 50.350 (350 sobre el suelo). Salta el kill switch y no se abre nada.
+        book(50350 - await broker.equity())
+        say("AAA/USDT", "LONG", 80)
+        hours["s"] = (True, False)
+        await boss.tick()
+        assert status("AAA/USDT").startswith("bloqueado: kill switch"), status("AAA/USDT")
+        # Día nuevo: 750 hasta el kill switch, pero solo 350 hasta el suelo. Cabe una operación de 200, no dos.
+        day["d"] = "2026-11-19"
+        config.MAX_OPEN_POSITIONS = 3
+        await boss.tick()
+        assert status("AAA/USDT") == "orden ejecutada", status("AAA/USDT")
+        say("BBB/USDT", "LONG", 80)
+        await boss.tick()
+        assert status("BBB/USDT").startswith("sin margen"), status("BBB/USDT")
+        # Una ganancia flotante sube el saldo, pero también está en juego: no abre hueco para otra operación.
+        fm.p = 102.5
+        await boss.tick()
+        assert status("BBB/USDT").startswith("sin margen"), status("BBB/USDT")
+        fm.p = 100.0
+        # La cuenta toca su suelo con una posición que no se puede cerrar: queda perdida y no entra nada más.
+        say("AAA/USDT", "NEUTRAL", 0)
+        real_close = broker.close
+
+        async def stuck(t):
+            raise ConnectionError("sin precio")
+
+        broker.close = stuck
+        book(-600)
+        await boss.tick()
+        assert db.get_state("fund")["gen"] == 1 and db.get_state("fund")["lost"] and len(trade_logger.open_trades()) == 1
+        assert status("BBB/USDT").startswith("bloqueado: cuenta 1 perdida"), status("BBB/USDT")
+        # El precio rebota y el saldo vuelve sobre el suelo: la cuenta sigue perdida, como en una prueba real.
+        fm.p = 102.8
+        await boss.tick()
+        assert acct()["equity"] + acct()["floating"] > acct()["floor"] and db.get_state("fund")["lost"]
+        assert status("BBB/USDT").startswith("bloqueado: cuenta 1 perdida")
+        # En cuanto se puede cerrar lo que quedaba, el relevo se completa.
+        broker.close = real_close
+        say("BBB/USDT", "NEUTRAL", 0)
+        born = db.get_state("fund")["born"]
+        await boss.tick()
+        fund, (lost,) = db.get_state("fund"), db.get_state("fund:history")
+        assert fund["gen"] == 2 and "lost" not in fund and not trade_logger.open_trades()
+        assert [c["exit_reason"] for c in trade_logger.closed_trades(mode="fondeo") if c["symbol"] == "AAA/USDT"] == ["MUERTE"]
+        assert acct()["gen"] == 2 and acct()["floor"] == 48000 and await broker.equity() == 50000, acct()
+        mine = trade_logger.closed_trades(since=born, mode="fondeo")
+        assert lost["gen"] == 1 and lost["n"] == len(mine) and abs(lost["net"] - sum(t["pnl"] for t in mine)) < 1e-6
+        assert acct()["day_pnl"] == 0 and fund["lesson"] != "configuración inicial", (acct(), fund)
+        # La lección del umbral queda en los ajustes de la app, donde se ve y se puede deshacer.
+        assert db.get_state("ctl:params")["DECISION_THRESHOLD"] == config.DECISION_THRESHOLD > 0.25, fund
+        fm.p = 100.0
+        assert any(n.startswith("💀 Cuenta 1 perdida") for n in notes)
+        assert trade_logger.events(5, kinds=("death",))[0]["text"].startswith("Cuenta 1 perdida")
+        # La cuenta nueva tiene su propio día: una pérdida de 800 salta el kill switch (750) mucho antes del suelo.
+        book(-800)
+        await boss.tick()
+        assert acct()["blocked"].startswith("kill switch") and db.get_state("fund")["gen"] == 2
+        # Una lección que veta un par, y otra que ensancha el stop: el jefe las aplica en cada ciclo.
+        day["d"] = "2026-11-20"
+        db.set_state("fund", db.get_state("fund") | {"blocked": [["AAA/USDT", "LONG"]], "atr_tf": "1h"})
+        say("AAA/USDT", "LONG", 80)
+        await boss.tick()
+        assert status("AAA/USDT").startswith("vetado por la cuenta 2") and config.ATR_TIMEFRAME == "1h"
+        # Una acción abierta cuando la cuenta toca su suelo con la bolsa cerrada: no se cierra al precio de ayer.
+        # La cuenta queda perdida y sin operar, y el relevo se completa en la apertura, a precio de entonces.
+        say("AAA/USDT", "NEUTRAL", 0)
+        say("NVDA", "SHORT", 90)
+        hours["s"], hours["since"] = (True, False), time.time() - 3600
+        await boss.tick()
+        assert [t["symbol"] for t in trade_logger.open_trades()] == ["NVDA"]
+        say("NVDA", "NEUTRAL", 0)
+        hours["s"], hours["since"] = (False, False), None
+        book(48000 - 1 - await broker.equity())
+        await boss.tick()
+        assert db.get_state("fund")["gen"] == 2 and db.get_state("fund")["lost"]
+        assert [t["symbol"] for t in trade_logger.open_trades()] == ["NVDA"]
+        hours["since"] = time.time() + 1  # abre la bolsa
+        await boss.tick()
+        assert db.get_state("fund")["gen"] == 3 and not trade_logger.open_trades()
+        assert [c["exit_reason"] for c in trade_logger.closed_trades(mode="fondeo") if c["symbol"] == "NVDA"][-1] == "MUERTE"
+    finally:
+        risk.nyse_session, risk.nyse_open_since, risk.trading_day = real
+        for key in ("ctl:params", "ctl:auto_opt", "fund", "fund:history", "account"):
+            db.del_state(key)
+
+    # 5) Las acciones y la cuenta de fondeo solo existen en simulación, con su límite diario y sin valores negativos.
+    run = lambda **env: subprocess.run([sys.executable, "-c", "import config; print(config.STOCKS, config.TOTAL_LOSS_LIMIT_USD)"],
+                                       cwd=config.ROOT, env=os.environ | env, capture_output=True, text=True)
+    assert "NVDA" in run(SYMBOLS="BTC/USDT:USDT,NVDA").stdout
+    r = run(SYMBOLS="BTC/USDT:USDT,NVDA", PAPER_TRADING="false")
+    assert r.returncode != 0 and "solo se simulan" in r.stderr, r.stderr
+    r = run(PROP_MAX_LOSS_USD="2000", PROP_DAILY_LOSS_LIMIT_USD="1000", PAPER_TRADING="false")
+    assert r.returncode != 0 and "PROP_MAX_LOSS_USD" in r.stderr, r.stderr
+    assert run(PROP_MAX_LOSS_USD="2000", BROKER="topstepx", PROP_DAILY_LOSS_LIMIT_USD="1000").returncode != 0
+    assert run(PROP_MAX_LOSS_USD="-2000").returncode != 0
+    assert "límite diario" in run(PROP_MAX_LOSS_USD="2000", PROP_DAILY_LOSS_LIMIT_USD="0").stderr
+    ok = run(PROP_MAX_LOSS_USD="2000", PROP_DAILY_LOSS_LIMIT_USD="1000", TOTAL_LOSS_LIMIT_USD="500")
+    assert ok.returncode == 0 and ok.stdout.split()[-1] == "0.0", ok  # la pérdida máxima sustituye al límite total
+
+
 if __name__ == "__main__":
     checks = [check_cache, check_risk, check_agents, check_boss_decision, check_lifecycle, check_evolution,
               check_tokens_and_alerts, check_ccxt_broker, check_macro, check_optimizer, check_app, check_orb,
-              check_backtest, check_alpaca, check_topstepx]
+              check_backtest, check_alpaca, check_topstepx, check_funded, check_scenarios]
     names = [c.__name__[6:] for c in checks]
     wanted = set(sys.argv[1:])  # sin argumentos, todas; `selfcheck.py optimizer app` ejecuta solo esas dos
     if wanted - set(names):
@@ -1281,7 +1786,7 @@ if __name__ == "__main__":
         print(f"selfcheck PARCIAL ({' '.join(n for n in names if n in wanted)}): bien. Antes de un commit hay que "
               "pasarlo entero, sin argumentos")
     else:
-        print("selfcheck OK: caché, riesgo y costes, 5 agentes, jefe, ciclo completo de operación, evolución "
+        print("selfcheck OK: caché, riesgo y costes, 6 agentes, jefe, ciclo completo de operación, evolución "
               "(muerte, mutación, persistencia), tokens, alertas, broker CCXT, macro, recompensas y optimizador, "
-              "controles de la app, ORB, backtest con validación fuera de muestra, datos de Alpaca y TopstepX "
-              "(API falsa local, kill switch, sesión y frecuencia)")
+              "controles de la app, ORB, backtest con validación fuera de muestra, datos de Alpaca, TopstepX "
+              "(API falsa local, kill switch, sesión y frecuencia), acciones con Yahoo, cuenta de fondeo simulada y bot de escenarios")

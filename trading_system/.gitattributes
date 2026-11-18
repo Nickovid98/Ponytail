@@ -1,0 +1,2 @@
+# Los lanzadores de Windows se guardan tal cual, con sus finales de linea CRLF.
+*.bat -text

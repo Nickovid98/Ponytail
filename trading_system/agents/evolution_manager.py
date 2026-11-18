@@ -36,6 +36,8 @@ LINEAGE = {
                 "niveles del perfil de volumen (POC, HVN, área de valor) para sesgo de medio plazo."),
     "sentiment": ("Trend_Sentiment", "Mide impulso y tendencia con EMA, MACD y RSI en 4H y 1D, más el "
                   "desequilibrio del libro de órdenes como proxy de order flow."),
+    "scenarios": ("Scenario_Simulator", "Simula miles de futuros ficticios de cada activo con sus propias velas de 5 "
+                  "minutos y vota solo por las 5 apuestas con mejor resultado medio en R, después de costes."),
     "orb": ("ORB_Breakout", "Opera la ruptura del rango de apertura: entra en la primera vela que cierra fuera "
             "del rango de los primeros minutos de la sesión, con stop en el punto medio del rango."),
 }

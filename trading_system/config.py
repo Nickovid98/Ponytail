@@ -76,6 +76,23 @@ PROP_VERIFY_WAIT_S = _f("PROP_VERIFY_WAIT_S", 1.0)
 MAX_TRADES_PER_DAY = int(_f("MAX_TRADES_PER_DAY", 10 if BROKER == "topstepx" else 0))  # 0 = sin tope
 MIN_ORDER_GAP_S = _f("MIN_ORDER_GAP_S", 60 if BROKER == "topstepx" else 0)  # espera entre entradas
 
+# --- Cuenta de fondeo simulada (lanzador "Iniciar cuenta de fondeo.bat") ----
+# La cuenta se pierde al caer PROP_MAX_LOSS_USD bajo su mejor cierre diario (el suelo deja de subir al
+# llegar a CAPITAL, como en el backtest) y nace otra que hereda lo aprendido. 0 = desactivado.
+PROP_MAX_LOSS_USD = _f("PROP_MAX_LOSS_USD", 0)
+FUNDED = PROP_MAX_LOSS_USD > 0
+
+# --- Acciones de EE. UU. (precios de Yahoo; solo simulación) ----------------
+# Un símbolo sin "/" (NVDA, MSFT...) es una acción. Opera en la sesión regular de Nueva York con velas de 1 h
+# para SMC, Wyckoff y el stop, como en las simulaciones de cuenta fondeada (con 5 min perdían más).
+STOCK_TIMEFRAME = _s("STOCK_TIMEFRAME", "1h")
+STOCK_FEE_PCT = _f("STOCK_FEE_PCT", 0.005)  # comisión por lado, en % del nocional
+STOCK_SLIPPAGE_PCT = _f("STOCK_SLIPPAGE_PCT", 0.02)
+STOCK_OPEN_WAIT_MIN = _f("STOCK_OPEN_WAIT_MIN", 60)  # sin entradas hasta que cierra la primera vela de 1 h del día
+STOCK_LAST_ENTRY_MIN = _f("STOCK_LAST_ENTRY_MIN", 30)  # sin entradas en la última media hora
+STOCK_FLAT_MIN = _f("STOCK_FLAT_MIN", 5)  # todo cerrado 5 minutos antes del cierre: nada pasa la noche abierto
+STOCKS = [s for s in SYMBOLS if BROKER == "ccxt" and "/" not in s]
+
 # --- Decisión --------------------------------------------------------------
 STRATEGY = _s("STRATEGY", "ensemble").lower()  # ensemble: los cinco agentes · orb: ruptura del rango de apertura
 if STRATEGY not in ("ensemble", "orb"):
@@ -83,6 +100,11 @@ if STRATEGY not in ("ensemble", "orb"):
 DECISION_THRESHOLD = _f("DECISION_THRESHOLD", 0.25)  # sobre un score en [-1, 1]
 MIN_AGENTS = int(_f("MIN_AGENTS", 1 if STRATEGY == "orb" else 3))  # agentes con señal vigente para poder operar
 APPROVAL_TTL_S = _f("APPROVAL_TTL_S", 120)  # validez de una aprobación manual
+# Bot de escenarios: cuántos futuros ficticios simula de cada activo, cuántas apuestas elige y, en cripto
+# (sin sesiones), cuántas horas dura cada escenario.
+SCENARIOS = int(_f("SCENARIOS", 10_000))
+SCENARIO_TOP = int(_f("SCENARIO_TOP", 5))
+SCENARIO_HOURS = _f("SCENARIO_HOURS", 6)
 
 # --- Evolución y tokens ----------------------------------------------------
 MAX_RULES = int(_f("MAX_RULES", 8))  # lecciones que conserva un agente; las más viejas se olvidan
@@ -130,6 +152,20 @@ if BROKER == "topstepx":
 if EXCHANGE_ID == "alpaca" and BROKER == "ccxt" and not PAPER_TRADING:
     raise SystemExit("Con Alpaca el motor solo simula (PAPER_TRADING=True): lee sus precios reales pero no envía\n"
                      "órdenes. Alpaca cripto es contado, sin cortos ni stops reduce-only, y esa ejecución no existe.")
+
+if STOCKS and not PAPER_TRADING:
+    raise SystemExit(f"Las acciones ({', '.join(STOCKS)}) solo se simulan (PAPER_TRADING=True): el motor lee sus precios\n"
+                     "en Yahoo y no hay ningún broker de acciones conectado que pueda recibir órdenes.")
+
+if PROP_MAX_LOSS_USD < 0:
+    raise SystemExit("PROP_MAX_LOSS_USD es lo que se puede perder bajo el mejor cierre diario: un importe positivo (o 0).")
+if FUNDED:
+    if BROKER != "ccxt" or not PAPER_TRADING:
+        raise SystemExit("PROP_MAX_LOSS_USD simula una cuenta de fondeo: solo con PAPER_TRADING=True y BROKER=ccxt.\n"
+                         "En una cuenta real de Topstep el suelo se fija con PROP_ACCOUNT_FLOOR_USD.")
+    if PROP_DAILY_LOSS_LIMIT_USD <= 0:
+        raise SystemExit("La cuenta de fondeo simulada necesita su límite diario en PROP_DAILY_LOSS_LIMIT_USD.")
+    TOTAL_LOSS_LIMIT_USD = 0.0  # la pérdida máxima de la cuenta sustituye al límite total de tu dinero
 
 if EXECUTION_MODE == "live" and _s("CONFIRM_LIVE") != "SI_ARRIESGO_DINERO_REAL":
     raise SystemExit(

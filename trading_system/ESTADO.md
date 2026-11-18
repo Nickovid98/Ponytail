@@ -9,7 +9,9 @@ Actualizado el 16-11-2026. Quien cierre una tarea actualiza este archivo en el m
   (`git fetch origin <rama> && git merge --ff-only FETCH_HEAD`, probado en un clon nuevo el 15-11). No se ha
   pedido un pull request.
 - **Qué funciona.** El motor (cinco bots, jefe, riesgo, selección natural), la app local, el simulador con cuenta
-  fondeada y examen fuera de muestra, y el modo Topstep contra una API falsa. `selfcheck.py` pasa entero.
+  fondeada y examen fuera de muestra, y el modo Topstep contra una API falsa. Desde el 16-11, además, la cuenta de
+  fondeo simulada en vivo (`Iniciar cuenta de fondeo.bat`): 50.000, cripto y las siete acciones del usuario con
+  precios de Yahoo, en largo y en corto, con relevo de cuenta. `selfcheck.py` pasa entero.
 - **Qué dice la investigación.** Con precios reales y después de costes, nada de lo probado gana dinero en datos
   que no había visto. No hay ventaja demostrada. Los objetivos del usuario no se han alcanzado en ninguna
   simulación.
@@ -31,17 +33,38 @@ Actualizado el 16-11-2026. Quien cierre una tarea actualiza este archivo en el m
   poder controlarlo y optimizarlo él, y que también se optimice solo. Está hecha.
 - **Skills.** Las de `.claude/skills/` las entregó él para que se aprovechen; las reglas del bot de ruptura salen
   de `trader-entry` y `trader-exit`.
+- **Cuenta de fondeo en vivo (16-11).** "este set de bots tambien debe operar con acciones, además de longs y
+  short, todo esto como si estuviera en una cuenta de fondeo". Hecho como cuenta de fondeo simulada en vivo, con
+  las mismas reglas que las simulaciones de abajo.
+- **Bot de escenarios (18-11).** "quiero agregar un bot que haga la mayor cantidad de escenarios ficticios de la
+  acción y elija los 5 mejores". Hecho como sexto bot: 10.000 escenarios por activo con el método de la skill
+  `trader-timemachine` y vota solo por las 5 mejores apuestas (activo y lado) con resultado medio positivo. Se
+  interpretó "los 5 mejores" como las 5 mejores apuestas para operar, no como los 5 escenarios más bonitos (eso no
+  sirve para decidir); hay que confirmárselo. Corre en los nueve activos, no solo en las acciones.
 
 Decisiones que se tomaron en su nombre en las simulaciones de cuenta fondeada, ya comunicadas: riesgo de 200 por operación
 (0,4 %) en vez del 1 %, eliminación al caer 2.000 bajo el mejor cierre diario (el suelo deja de subir al llegar
 al capital inicial), límite diario de 1.000 con cierre forzoso al 75 %, acciones en velas de 1 hora cerrando
 todo al final de la sesión, y relevos corregidos con reglas fijas, sin Claude.
 
+Decisiones tomadas en su nombre el 16-11 para la cuenta de fondeo en vivo, comunicadas al cerrar la tarea: cripto
+(BTC y ETH de Binance) y sus siete acciones en la misma cuenta; 3 posiciones a la vez y apalancamiento máximo 2x
+por posición; acciones con velas de 1 hora para SMC, Wyckoff y el stop, como en las simulaciones (con velas de 5
+min perdían más), y cripto con las del motor; entradas en acciones desde que cierra la primera vela de 1 hora
+(10:30) hasta media hora antes del cierre, todo cerrado 5 minutos antes del cierre de Nueva York, y lo que quede
+abierto de un día anterior se cierra en la apertura siguiente; comisión de acciones 0,005 % y deslizamiento 0,02 %
+por lado, acciones enteras, y el stop que salta con un hueco se ejecuta donde abrió la vela; el día operativo
+(límite diario y mejor cierre) es el día UTC, como ya lo era en cripto; entra primero la señal más fuerte cuando no
+hay hueco para todas; y no se abre nada cuyo stop, sumado al de lo abierto, pase de lo que queda hasta el kill
+switch o el suelo (esto último no lo hace el backtest).
+
 ## Esperando respuesta del usuario
 
 1. ¿Le abre la app con doble clic en `Iniciar.bat`? Claude lo ejecutó en su PC el 16-11 y funcionó (ver
    "Comprobado en Windows"); falta que él lo confirme con su propio doble clic.
 2. ¿"40–50 %" es rentabilidad anual o porcentaje de operaciones ganadoras?
+2b. ¿"Elija los 5 mejores" eran las 5 mejores apuestas para operar (así está hecho) y en todos los activos, o
+   solo en las acciones?
 3. ¿Parar, o hacer la prueba de "acciones en juego"? Criterio que se le propuso: dos años de exámenes fuera de
    muestra, resultado neto positivo, más de la mitad de los periodos en positivo y ninguna cuenta perdida; si no
    lo cumple, la idea se abandona sin más ajustes.
@@ -59,6 +82,9 @@ Los pendientes 1 y 5 solo se pueden comprobar en el ordenador del usuario; desde
 1. **La app en Windows.** Probada por Claude en su PC el 16-11 (abre, enciende el motor, se apaga al cerrar).
    Hecho cuando el usuario confirme que le abre con doble clic. Si falla, se arregla a partir del mensaje de
    error que copie.
+1b. **La cuenta de fondeo simulada en vivo.** Dejarla correr. Con pocas semanas no dice nada a favor ni en contra
+   (regla 5 de "Investigar estrategias"); lo honesto es compararla con lo ya simulado, que perdió dinero. Mezcla
+   cripto y acciones en una cuenta y no tiene un backtest igual.
 2. **Aclarar el objetivo** (respuesta 2) antes de tocar nada de estrategia.
 3. **Prueba de "acciones en juego"**, solo si el usuario la elige y aporta claves de una cuenta paper de Alpaca.
    Falta un cargador de velas de acciones de Alpaca (5 minutos, dos años o más, universo amplio) y elegir cada
@@ -73,8 +99,9 @@ Los pendientes 1 y 5 solo se pueden comprobar en el ordenador del usuario; desde
    fuente de terceros. El suelo de la cuenta se actualiza a mano en `.env`. Precio y posiciones van por REST con
    hasta 5 s de retraso; no hay WebSocket.
 
-No hacer sin que el usuario lo pida: enviar órdenes a Alpaca, dar al motor una fuente de precios de acciones en
-vivo, añadir genes al bot de ruptura o repetir el año de simulación cambiando reglas hasta que salga bien.
+No hacer sin que el usuario lo pida: enviar órdenes a Alpaca o a cualquier broker de acciones (las acciones solo se
+simulan), añadir genes al bot de ruptura o repetir el año de simulación cambiando reglas hasta que salga bien. La
+fuente de precios de acciones en vivo (Yahoo) la pidió el 16-11 y ya está.
 
 ## Ya probado: no repetir
 
@@ -177,6 +204,33 @@ Comprobado en Windows, en el PC del usuario (16-11, sesión de Claude Code de es
   (cp1252 no tiene la "σ" del Historiador); ahora escribe en UTF-8. La prueba de caché de `selfcheck.py`
   fallaba 1 de cada 6 veces en Windows por un plazo de 50 ms; ahora usa 0,5 s.
 - Sin probar con un doble clic del propio usuario.
+- Cuenta de fondeo simulada (16-11, con la bolsa abierta): `Iniciar cuenta de fondeo.bat` abre la app en
+  `localhost:8502`, el motor se enciende desde ella, Yahoo sirve velas de 1 min a 1 día de las siete acciones en
+  menos de medio segundo por petición, los cinco bots dan señal en los nueve activos sin errores y el jefe operó
+  acciones en corto y en largo con 200 de riesgo cada una. `selfcheck.py funded` cubre horario de Nueva York
+  (festivos, cierre temprano, cambio de hora), costes y acciones enteras, velas de 1 h, datos de Yahoo sin red y
+  sus fallos, orden por fuerza, cierre antes del cierre y en la apertura siguiente, fallo de precio aislado,
+  suelo, margen, kill switch, cuenta perdida aunque rebote y relevo; se rompieron a propósito 28 de sus reglas y
+  la comprobación detectó todas. La app se probó con `AppTest` en modo fondeo, sin errores.
+- Un incidente real que llevó a dos arreglos: el motor murió con la sesión de Claude que lo había lanzado y tres
+  acciones quedaron sin vigilar unas 3 horas. Al volver, el motor solo miraba los últimos 10 minutos de precios;
+  ahora revisa desde la apertura de cada operación, y al reiniciarlo encontró un objetivo (GOOGL, +365) y un stop
+  (MSFT, −200) tocados durante el apagón. Ahora se lanza como un doble clic, independiente de la sesión.
+- Dos rondas de revisión con críticos independientes (diseño y código); lo que encontraron está arreglado o
+  anotado como límite (`ponytail:` y "Lo que no modela" en el `README.md`). De la segunda ronda solo terminó el
+  ángulo de riesgo (el límite de uso cortó los de datos y sesiones, regresiones y pruebas); sus 6 hallazgos están
+  arreglados: el margen cuenta lo abierto desde su precio y con costes, la primera cuenta nace antes de leer el
+  saldo, el hueco de una acción se ve también por el precio de ahora, los stops se revisan con velas más gruesas
+  tras apagones de más de 16 h, el Laboratorio de la app de fondeo vuelve a simular sin reglas de fondeo, y con la
+  bolsa cerrada ningún cierre de emergencia toca las acciones (se cierran en la apertura).
+- Motor de la cuenta de fondeo en marcha del 16 al 18-11 con los arreglos urgentes: 23 operaciones cerradas,
+  +693 netos, cuenta 1 viva con el suelo en 49.131; cerró las acciones a las 15:55 cada día y siguió con el
+  último precio cuando Yahoo no respondió. Es poquísima historia: no dice nada de la estrategia.
+- Bot de escenarios (18-11): `selfcheck.py scenarios` cubre el lado según la tendencia, nada sin ventaja tras
+  costes, solo las 5 mejores y en orden, mismos escenarios con los mismos datos, la cuenta de cada escenario, la
+  misma hora del día y solo sesiones completas en acciones, bolsa cerrada y el fallo de un activo; se rompieron
+  10 de sus reglas a propósito y la comprobación detectó todas. Con datos reales tarda unos 3 s para los nueve
+  activos; el 18-11 por la tarde, con la bolsa cerrada, ni BTC ni ETH tenían un lado positivo y no votó por nada.
 
 Sin comprobar:
 
@@ -187,7 +241,9 @@ Sin comprobar:
 
 `data/` no está en git y se pierde con el contenedor: hay que volver a descargar. Yahoo se guarda por día en
 `data/`; Alpaca sin clave es lento por su límite de peticiones. Las cifras cambian con la ventana de datos (Yahoo
-solo sirve los últimos 730 días en velas de 1 hora) y con la versión del código.
+solo sirve los últimos 730 días en velas de 1 hora) y con la versión del código. Desde el 16-11 SMC y Wyckoff
+usan `STOCK_TIMEFRAME` (1 h por defecto) en las acciones: para repetir la simulación de acciones con velas de 5
+minutos hay que añadir `STOCK_TIMEFRAME=5m`.
 
 Cuenta fondeada con las siete acciones, desde `trading_system/`:
 
@@ -265,3 +321,9 @@ del usuario.
     `respaldo/plataforma-local` (`f9ebbfb`, sin subir). Lo único que tenía y esta no: editor del calendario de
     eventos, descarga de operaciones en CSV, botón de `selfcheck` y registro del motor en pantalla. Después, las
     pruebas de Windows y Binance de "Comprobado en Windows".
+13. **16-11, cuenta de fondeo en vivo con acciones.** "ahora ejecuta todo lo que debas, recuerda que este set de
+    bots tambien debe operar con acciones, además de longs y short, todo esto como si estuviera en una cuenta de
+    fondeo". Acciones en simulación con precios de Yahoo junto a cripto, horario de Nueva York, costes por activo,
+    reglas y relevo de cuenta de fondeo en el motor en vivo, `Iniciar cuenta de fondeo.bat` y su panel en la app.
+14. **18-11, bot de escenarios.** "quiero agregar un bot que haga la mayor cantidad de escenarios ficticios de la
+    acción y elija los 5 mejores". El sexto bot, `agents/scenario_agent.py`, y su tabla en la Sala de control.

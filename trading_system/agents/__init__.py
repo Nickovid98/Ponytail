@@ -14,6 +14,7 @@ AGENT_LABELS = {
     "smc": "3 · SMC Intradía",
     "wyckoff": "4 · Wyckoff y Perfil de Volumen",
     "sentiment": "5 · Tendencia y Sentimiento",
+    "scenarios": "6 · Escenarios ficticios",
 }
 if config.STRATEGY == "orb":  # con esta estrategia opera un único agente
     AGENT_LABELS = {"orb": "Ruptura del rango de apertura"}

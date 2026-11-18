@@ -24,6 +24,11 @@ entorno (unos minutos) y crea tu `.env`; después abre la app en el navegador. E
 motor se enciende y se apaga desde la propia app, y al cerrar esa ventana se
 apagan los dos.
 
+**La cuenta de fondeo simulada:** doble clic en `Iniciar cuenta de fondeo.bat`.
+Abre otra app (en `localhost:8502`) con 50.000 USD, cripto y acciones, en largo
+y en corto, y las reglas de una cuenta de fondeo. Se explica en «Cuenta de
+fondeo simulada: cripto y acciones».
+
 A mano, en cualquier sistema:
 
 ```bash
@@ -79,12 +84,36 @@ numéricas (`features`) en las que se basó.
 |---|---|---|---|---|
 | Historiador | `Market_Historian` | Regresión sobre log-precio, R², desviación en σ, estacionalidad horaria | 1h | 3 min |
 | Macro | `Macro_Watcher` | Titulares (Alpha Vantage + RSS) y calendario de eventos | — | 15 min |
-| SMC | `SMC_Scalper` | BOS / CHoCH, order blocks, FVG, barridos y pools de liquidez | 5m | 1 min |
+| SMC | `SMC_Scalper` | BOS / CHoCH, order blocks, FVG, barridos y pools de liquidez | 5m (acciones 1h) | 1 min |
 | Wyckoff | `Wyckoff_Volume` | Fase de Wyckoff, POC, HVN y área de valor | 1h | 3 min |
 | Tendencia | `Trend_Sentiment` | EMA 50/200, MACD y RSI en 4H y 1D, desequilibrio del libro | 4h, 1d | 3 min |
+| Escenarios | `Scenario_Simulator` | 10.000 futuros ficticios por activo y vota solo por las 5 mejores apuestas | 5m | 3 min |
 
-Cuatro de los cinco son cálculo puro: no gastan tokens y dan siempre el mismo
+Cinco de los seis son cálculo puro: no gastan tokens y dan siempre el mismo
 resultado con los mismos datos. Solo el agente macro consulta a Claude.
+
+### El bot de escenarios (`agents/scenario_agent.py`)
+
+Rehace el futuro de cada activo 10.000 veces (`SCENARIOS`) con sus propias velas
+de 5 minutos, con el método de la skill `trader-timemachine`: cada tramo es una
+vela pasada, escalada al precio de ahora. En acciones, una vela de la misma hora
+de la sesión (±2 velas) de las sesiones completas de los últimos 60 días, hasta 5
+minutos antes del cierre; con la bolsa cerrada no simula. En cripto, cualquiera
+de las últimas ~3,5 jornadas, durante 6 horas (`SCENARIO_HOURS`). En cada
+escenario prueba la operación que pondría el jefe, en largo y en corto (stop por
+ATR, objetivo a 2 veces el riesgo, con comisiones y deslizamiento), y anota el
+resultado en R: −1 en el stop (si una vela toca los dos niveles, cuenta el stop),
+el objetivo neto de costes, o lo que valga al acabar el tiempo.
+
+Después ordena las apuestas (el mejor lado de cada activo) por su resultado medio
+y vota solo por las 5 mejores (`SCENARIO_TOP`) que salen positivas; si ninguna lo
+es, no vota por nada. Su voto cuenta como el de cualquier otro bot: el jefe sigue
+exigiendo acuerdo. La Sala de control enseña su tabla: puesto, lado, cuántas
+veces llega antes al objetivo o al stop y el resultado medio.
+
+No predice: los escenarios repiten cómo se movió el activo hace poco, y si el
+mercado cambia de carácter se quedan viejos al momento. No está en el backtest:
+10.000 simulaciones por activo en cada paso harían la simulación eterna.
 
 ## Selección natural (`agents/evolution_manager.py`)
 
@@ -220,6 +249,66 @@ peticiones por minuto): alcanza para `backtest.py`, no para el motor en
 continuo. Con la clave de una cuenta paper el límite deja de ser un problema;
 la clave solo se usa para leer datos. Los cortos que abra la simulación no se
 podrían replicar en una cuenta de Alpaca.
+
+## Cuenta de fondeo simulada: cripto y acciones
+
+`Iniciar cuenta de fondeo.bat` arranca la app y el motor con estas reglas, que
+mandan sobre `.env` solo en esa ventana (son las de las simulaciones de cuenta
+fondeada de `ESTADO.md`):
+
+| Regla | Valor |
+|---|---|
+| Capital de cada cuenta | 50.000 USD |
+| Riesgo por operación | 0,4 % (200), neto de costes |
+| Pérdida diaria | 1.000; al 75 % (750) se cierra todo y no se opera hasta el día siguiente (UTC) |
+| Pérdida máxima | la cuenta se pierde al caer 2.000 bajo su mejor cierre diario; ese suelo deja de subir en 50.000 |
+| Margen | no se abre nada cuyo stop, sumado al de lo abierto, pase de lo que queda hasta el kill switch o el suelo |
+| Activos | BTC y ETH (Binance) y NVDA, META, GOOGL, TTWO, MU, MSFT y UBER, en largo y en corto |
+| Posiciones a la vez | 3, apalancamiento máximo 2x por posición |
+
+Todo es simulado (`PAPER_TRADING=True` forzado): precios reales y ninguna orden
+sale del equipo. El lanzador fija también exchange, estrategia, marcos de tiempo,
+costes y frecuencia, para que tu `.env` no los cambie. El historial va aparte, en
+`trades_fondeo.db`, y el registro del motor en `data/motor_trades_fondeo.txt` y
+`trading_fondeo.log`; las dos apps pueden estar abiertas a la vez.
+
+**Acciones.** Un símbolo sin "/" es una acción. Sus velas y su precio salen de
+Yahoo Finance (gratis y sin clave; las de 4 h se forman con las de 1 h) y los bots
+solo ven velas ya cerradas, como en el backtest. Usan velas de 1 hora para SMC,
+Wyckoff y el stop (`STOCK_TIMEFRAME`), como en las simulaciones de cuenta
+fondeada: con velas de 5 minutos perdían bastante más. Solo se opera en la sesión
+regular de Nueva York: se entra desde que cierra la primera vela de 1 hora (10:30)
+hasta media hora antes del cierre, y todo se cierra 5 minutos antes del cierre
+(16:00, o 13:00 los días de cierre temprano). Si el motor estaba apagado al
+cierre, lo que quedó abierto se cierra en la apertura siguiente, a precio de
+entonces. Los festivos de 2026 y 2027 vienen de la skill `trader-alerts`. Costes:
+0,005 % de comisión y 0,02 % de deslizamiento por lado (`STOCK_FEE_PCT`,
+`STOCK_SLIPPAGE_PCT`), acciones enteras redondeadas hacia abajo, y un stop que
+salta con un hueco de precio se ejecuta donde abrió esa vela. Las acciones solo
+se simulan: con `PAPER_TRADING=False` el programa no arranca.
+
+**Relevo de cuenta.** La cuenta se pierde la primera vez que toca el suelo, aunque
+el precio rebote después: se cierra todo (mientras quede algo sin cerrar no se
+abre nada), la cuenta queda anotada y nace otra con 50.000 que hereda lo
+aprendido y corrige una causa, con el mismo diagnóstico que el backtest
+(`--lineage`): stop más ancho, más acuerdo exigido, veto al par activo/lado que
+más perdió o menos riesgo. El acuerdo y el riesgo nuevos quedan en Ajustes,
+donde se pueden deshacer. La Sala de control enseña la cuenta en curso, su
+suelo, la pérdida del día frente al kill switch, si la bolsa está abierta y las
+cuentas perdidas.
+
+**Si fallan los datos.** Cada posición se vigila por separado: si Yahoo o el
+exchange no responden para un activo, se usa su último precio conocido y los
+límites, el suelo y los cierres siguen funcionando para todo lo demás. Tras un
+apagado, los stops y objetivos se revisan desde la apertura de cada operación,
+así que lo que saltó mientras el motor no miraba también cuenta. Tras un 429 de
+Yahoo (demasiadas peticiones) se le deja de pedir dos minutos.
+
+Lo que no modela: el coste de pedir prestadas las acciones para ir corto, la
+regla del tick al alza, el preapertura ni las subastas, ni las paradas de
+cotización (se opera con el último precio que dé Yahoo). Yahoo no tiene API
+oficial: si cambia o bloquea, las acciones se quedan sin datos y no operan
+(cripto sigue). La cuenta mezcla cripto y acciones y no tiene un backtest igual.
 
 ## Topstep: futuros con TopstepX (`utils/topstepx.py`)
 
@@ -399,7 +488,8 @@ sandbox y en real los stops viven en el exchange.
   su techo. Que el código funcione no significa que la estrategia gane dinero.
 - **El deslizamiento es fijo.** No depende del tamaño de la orden ni de la
   liquidez; en mercados rápidos el real será peor.
-- **No es alta frecuencia** y **solo opera cripto** (CCXT no conecta con Forex).
+- **No es alta frecuencia.** Opera cripto por CCXT y, solo en simulación,
+  acciones de EE. UU. con precios de Yahoo (CCXT no conecta con Forex).
 - **No hay calendario económico en vivo.** `macro_events.csv` se mantiene a
   mano; el agente macro veta entradas 30 minutos antes y después de cada evento.
 - **Probado sin red.** `selfcheck.py` cubre riesgo y costes, decisión, ciclo
@@ -418,6 +508,7 @@ CLAUDE.md                guía de trabajo para sesiones de Claude Code
 ESTADO.md                qué está hecho, qué se probó ya (con sus cifras) y qué falta, para retomar el trabajo
 dashboard.py             la app (Streamlit): bots, jefe, laboratorio y ajustes
 Iniciar.bat              lanzador para Windows: prepara el entorno y abre la app
+Iniciar cuenta de fondeo.bat   la misma app con la cuenta de fondeo simulada (cripto y acciones)
 optimizer.py             recompensas, confianza del jefe en cada bot y ajustes de la app
 selfcheck.py             comprobación de extremo a extremo
 config.py                toda la configuración (.env)

@@ -1,7 +1,7 @@
 """Agente 3 · SMC Intradía: estructura (BOS/CHoCH), order blocks, FVG y liquidez."""
 import config
 from agents import Signal, neutral
-from utils.risk_manager import atr
+from utils.risk_manager import atr, is_stock
 
 
 class SMCAgent:
@@ -12,10 +12,11 @@ class SMCAgent:
     k = 3  # velas a cada lado para confirmar un swing
 
     async def run(self, symbol, market) -> Signal:
-        return self.analyze(symbol, await market.ohlcv(symbol, self.timeframe, self.limit))
+        tf = config.STOCK_TIMEFRAME if is_stock(symbol) else self.timeframe  # acciones: velas de 1 h
+        return self.analyze(symbol, await market.ohlcv(symbol, tf, self.limit), tf)
 
     @classmethod
-    def analyze(cls, symbol, df) -> Signal:
+    def analyze(cls, symbol, df, tf: str | None = None) -> Signal:
         # ponytail: reglas mecánicas sobre fractales de k velas. Techo: un solo
         # timeframe, y un order block es simplemente "la última vela contraria
         # antes de la ruptura". Para afinarlo, añadir el sesgo de 15m/1h.
@@ -82,7 +83,7 @@ class SMCAgent:
 
         conf = (58 if kind == "CHoCH" else 50) + 15 * sweep + 15 * retest + 10 * (fvg is not None) - min(35, age * 0.7)
         conf = int(max(0, min(100, conf)))
-        tf = cls.timeframe
+        tf = tf or cls.timeframe
         why = (f"{kind} {'alcista' if d > 0 else 'bajista'} hace {age} velas {tf}; "
                f"OB {ob_lo:.6g}-{ob_hi:.6g}{' en retest' if retest else ''}"
                + (f"; FVG {fvg[0]:.6g}-{fvg[1]:.6g}" if fvg else "") + ("; barrido previo" if sweep else ""))

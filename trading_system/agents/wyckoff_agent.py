@@ -3,6 +3,7 @@ import numpy as np
 
 import config
 from agents import Signal, neutral
+from utils.risk_manager import is_stock
 
 
 class WyckoffAgent:
@@ -13,7 +14,8 @@ class WyckoffAgent:
     rng = 60  # velas que se examinan como posible rango
 
     async def run(self, symbol, market) -> Signal:
-        return self.analyze(symbol, await market.ohlcv(symbol, self.timeframe, self.limit))
+        tf = config.STOCK_TIMEFRAME if is_stock(symbol) else self.timeframe  # acciones: velas de 1 h
+        return self.analyze(symbol, await market.ohlcv(symbol, tf, self.limit))
 
     @staticmethod
     def volume_profile(df, bins: int = 40) -> dict | None:

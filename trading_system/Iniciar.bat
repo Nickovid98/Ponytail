@@ -1,6 +1,8 @@
 @echo off
 chcp 65001 >nul
-title Mesa de bots
+if not defined APP_TITLE set "APP_TITLE=Mesa de bots"
+if not defined APP_PORT set "APP_PORT=8501"
+title %APP_TITLE%
 cd /d "%~dp0"
 
 set "PY=python"
@@ -25,11 +27,11 @@ if not exist venv\Scripts\python.exe (
 if not exist .env copy .env.example .env >nul
 
 echo.
-echo Abriendo la app en el navegador: http://localhost:8501
+echo Abriendo la app en el navegador: http://localhost:%APP_PORT%
 echo Deja esta ventana abierta. Al cerrarla se apagan la app y el motor.
 echo.
-start "" /b cmd /c "ping -n 6 127.0.0.1 >nul & start http://localhost:8501"
-venv\Scripts\python -m streamlit run dashboard.py --server.headless true --server.port 8501
+start "" /b cmd /c "ping -n 6 127.0.0.1 >nul & start http://localhost:%APP_PORT%"
+venv\Scripts\python -m streamlit run dashboard.py --server.headless true --server.port %APP_PORT%
 pause
 exit /b 0
 

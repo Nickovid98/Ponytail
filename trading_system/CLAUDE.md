@@ -1,8 +1,10 @@
 # trading_system: guía de trabajo para Claude
 
-Mesa de trading multi-agente con app local: cinco bots analizan, un jefe determinista decide y ejecuta, y
+Mesa de trading multi-agente con app local: seis bots analizan, un jefe determinista decide y ejecuta, y
 `dashboard.py` lo enseña y lo controla. Opera cripto por CCXT y futuros de Topstep (`BROKER=topstepx`); las
-acciones solo se simulan. El usuario no es programador y escribe en español: respóndele en español llano.
+acciones de EE. UU. solo en simulación, con precios de Yahoo (un símbolo sin "/" es una acción). La cuenta de
+fondeo simulada (cripto y acciones, 50.000) se abre con `Iniciar cuenta de fondeo.bat`, que fija sus reglas y su
+propia base de datos. El usuario no es programador y escribe en español: respóndele en español llano.
 
 **Lee `ESTADO.md` antes de proponer o repetir nada.** Dice qué funciona, qué se probó ya (con sus cifras) y qué
 falta, por orden. Actualízalo en el mismo commit que cierre cada tarea. `README.md` es el manual del usuario:
@@ -42,22 +44,23 @@ consulta solo la sección que toque (`grep -n '^#' README.md`).
 
 `selfcheck OK` es obligatorio antes de cada commit; la pasada parcial sirve para iterar y no lo sustituye.
 Comprobaciones: `cache risk agents boss_decision lifecycle evolution tokens_and_alerts ccxt_broker macro optimizer
-app orb backtest alpaca topstepx`. Solo `backtest` es lenta (50 s).
+app orb backtest alpaca topstepx funded scenarios`. Solo `backtest` es lenta (50 s).
 
 ## Mapa (salta con `grep -n "def nombre"`, no leas archivos enteros)
 
 | Archivo | Qué hay | Puntos de entrada |
 |---|---|---|
-| `config.py` | toda la configuración (entorno y `.env`) y las negativas de seguridad al arrancar | `BROKER`, `STRATEGY`, `PROP_*` |
+| `config.py` | toda la configuración (entorno y `.env`) y las negativas de seguridad al arrancar | `BROKER`, `STRATEGY`, `PROP_*`, `FUNDED`, `STOCK_*`, `STOCKS` |
 | `main.py` | orquestador asyncio; `--child` es el motor que lanza la app | `run_agent`, `boss_loop`, `alive_loop`, `_main` |
 | `agents/__init__.py` | `Signal`, el contrato de los bots, y `AGENT_LABELS` | |
-| `agents/{smc,wyckoff,sentiment,historian,macro}_agent.py` | los cinco bots; solo `macro` llama a Claude | `run`, `analyze` |
+| `agents/{smc,wyckoff,sentiment,historian,macro}_agent.py` | cinco de los seis bots; solo `macro` llama a Claude | `run`, `analyze` |
+| `agents/scenario_agent.py` | el sexto: 10.000 escenarios por activo y vota por las 5 mejores apuestas (no va en el backtest) | `rank`, `simulate`, `outcomes` |
 | `agents/orb_agent.py` | ruptura del rango de apertura (`STRATEGY=orb`) | `DEFAULT`, `GRID`, `genomes`, `analyze` |
-| `agents/boss_agent.py` | decisión ponderada, límites, kill switch y ejecución | `decide`, `tick`, `_maybe_trade`, `_close`, `_flatten` |
+| `agents/boss_agent.py` | decisión ponderada, límites, kill switch, ejecución y relevo de la cuenta de fondeo | `decide`, `tick`, `_maybe_trade`, `_fund`, `_floor`, `_relevo`, `_flatten` |
 | `agents/evolution_manager.py` | muerte y renacimiento de bots; post-mortem con Claude | `on_trade_closed`, `_kill`, `_rebirth` |
 | `optimizer.py` | recompensas en R, confianza del jefe en cada bot, ajustes de la app | `reward`, `new_weights`, `TUNABLE`, `apply_params`, `run` |
-| `utils/risk_manager.py` | stop, tamaño, costes, límites diarios y sesión | `build_plan`, `stop_distance`, `check_limits` |
-| `utils/exchange.py` | datos (CCXT, Alpaca), `PaperBroker`, `CcxtBroker` | `make_exchange`, `Market.ohlcv` |
+| `utils/risk_manager.py` | stop, tamaño, costes por activo, límites diarios, sesión de Topstep y de Nueva York | `build_plan`, `costs`, `is_stock`, `nyse_session`, `nyse_open_since`, `check_limits` |
+| `utils/exchange.py` | datos (CCXT, Alpaca; acciones por Yahoo), `PaperBroker`, `CcxtBroker` | `make_exchange`, `yahoo_chart`, `Market.ohlcv` |
 | `utils/topstepx.py` | cliente REST de ProjectX, datos y brokers de futuros | `TopstepClient`, `TopstepBroker.open`, `flatten_all` |
 | `utils/trade_logger.py` | operaciones, genealogía y bitácora (`events`) en SQLite | `log_close`, `log_event`, `events` |
 | `utils/db.py` | SQLite y el estado compartido `kv` | `get_state`, `set_state`, `del_state` |
@@ -68,7 +71,8 @@ app orb backtest alpaca topstepx`. Solo `backtest` es lenta (50 s).
 
 Motor y app solo se hablan por la tabla `kv`. Órdenes de la app: `ctl:kill`, `ctl:mode`, `ctl:params`,
 `ctl:bench`, `ctl:auto_opt`, `ctl:engine` ("stop"). Estado del motor: `engine` (latido `{pid, ts}`), `account`,
-`weights`, `boss:error`, `boss:{símbolo}`, `signal:{bot}:{símbolo}`, `status:{bot}:{símbolo}`, `approve:{símbolo}`.
+`fund` y `fund:history` (cuenta de fondeo simulada),
+`scenarios:ranking`, `weights`, `boss:error`, `boss:{símbolo}`, `signal:{bot}:{símbolo}`, `status:{bot}:{símbolo}`, `approve:{símbolo}`.
 
 ## Cómo comprobar cada tipo de cambio
 
@@ -80,7 +84,7 @@ Motor y app solo se hablan por la tabla `kv`. Órdenes de la app: `ctl:kill`, `c
   `EXCHANGE_ID=alpaca SYMBOLS=BTC/USD,ETH/USD QUOTE=USD FEE_PCT=0.25 BOSS_INTERVAL=60 SMC_INTERVAL=180
   TECH_INTERVAL=600` delante del comando (sin clave, Alpaca corta con 429 si se le pide más deprisa).
 - **Estrategia:** el protocolo de abajo.
-- **Lo que no se puede probar aquí** (`Iniciar.bat` en Windows, Binance, TopstepX real, cuentas con claves): dilo
+- **Lo que no se puede probar en la nube** (`Iniciar.bat` en Windows, Binance, TopstepX real, cuentas con claves): dilo
   tal cual en el informe, no lo des por bueno.
 
 ## Investigar estrategias sin engañarse

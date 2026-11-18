@@ -20,6 +20,7 @@ from agents.boss_agent import BossAgent
 from agents.evolution_manager import EvolutionManager
 from agents.historian_agent import HistorianAgent
 from agents.orb_agent import ORBAgent
+from agents.scenario_agent import ScenarioAgent
 from agents.macro_agent import MacroAgent
 from agents.sentiment_agent import SentimentAgent
 from agents.smc_agent import SMCAgent
@@ -134,11 +135,12 @@ async def _main(once: bool) -> None:
             agents = [ORBAgent()]
         else:
             agents = [HistorianAgent(), MacroAgent(system=lambda: evo.instructions("macro")), SMCAgent(),
-                      WyckoffAgent(), SentimentAgent()]
+                      WyckoffAgent(), SentimentAgent(), ScenarioAgent()]
         boss = BossAgent(market, broker, {a.name: 3 * a.interval + 60 for a in agents}, evo, notifier.send)
         log.info("%s en %s · %s · riesgo %.1f%%/op · comisión %.3f%% + deslizamiento %.3f%% por lado · Claude %s",
                  {"paper": "PAPER TRADING", "sandbox": "SANDBOX", "live": "REAL TRADING"}[config.EXECUTION_MODE],
-                 "TopstepX" if config.BROKER == "topstepx" else config.EXCHANGE_ID, ", ".join(config.SYMBOLS), config.RISK_PER_TRADE_PCT, config.FEE_PCT,
+                 "TopstepX" if config.BROKER == "topstepx" else config.EXCHANGE_ID + (" y Yahoo (acciones)" if config.STOCKS else ""),
+                 ", ".join(config.SYMBOLS), config.RISK_PER_TRADE_PCT, config.FEE_PCT,
                  config.SLIPPAGE_PCT,
                  config.CLAUDE_MODEL if config.USE_CLAUDE else "desactivado (sin ANTHROPIC_API_KEY)")
         log.info("Generaciones activas: %s", ", ".join(g["name"] for g in evo.active.values()))
