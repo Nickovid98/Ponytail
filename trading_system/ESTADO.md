@@ -1,6 +1,6 @@
 # Estado del proyecto
 
-Actualizado el 16-11-2026. Quien cierre una tarea actualiza este archivo en el mismo commit.
+Actualizado el 19-11-2026. Quien cierre una tarea actualiza este archivo en el mismo commit.
 
 ## En una pantalla
 
@@ -74,6 +74,46 @@ switch o el suelo (esto último no lo hace el backtest).
 6. ¿Sigue queriendo instalar en su PC los programas de los que dependen algunas skills (Strix, agent-reach, el
    plugin de claude-mem)? Lo pidió el 11-11 y desde la nube no se pudo; lo que necesita cada una está en
    `.claude/skills/README.md`.
+
+## Examen del bot de escenarios (19-11, escrito antes de ver ningún resultado)
+
+El usuario pidió "prepara el paso 3": examinar el bot 6 con al menos un año y 100 operaciones antes de fiarse.
+
+- **Hipótesis.** Las apuestas que el bot 6 elige (el mejor lado de cada activo, solo si su media en los 10.000
+  escenarios es positiva, las 5 mejores) ganan dinero de verdad después de costes.
+- **Por qué no hace falta entrenar.** El bot no tiene nada que ajustar: cada decisión usa solo velas anteriores a
+  ese momento, así que todo el periodo es examen. No se cambia ningún parámetro del bot (R:R 2, stop 1,5 ATR,
+  horizonte 6 h en cripto y hasta 5 min antes del cierre en acciones). La única diferencia es que se usan 2.000
+  escenarios en vez de 10.000, para que tarde minutos y no horas; la media cambia unas centésimas de R.
+- **Cómo.** `scenario_exam.py`. Cripto: BTC y ETH de `binanceusdm` en velas de 5 min, dos años, una decisión cada
+  6 h (00, 06, 12 y 18 UTC). La operación que da el resultado se cierra con las mismas reglas sobre las velas que
+  vinieron después. Acciones: las siete del usuario, una decisión al día a las 10:30 de Nueva York, con los 60
+  días de velas de 5 min que da Yahoo. Eso no llega a un año y no cuenta para aprobar.
+- **Criterio de aprobado (cripto, dos años).** Las cuatro a la vez:
+  1. al menos 100 operaciones;
+  2. resultado medio por operación positivo, neto de costes;
+  3. más de la mitad de los trimestres en positivo;
+  4. ninguna caída de 10 R o más desde el máximo, que con 200 por R son los 2.000 que hacen perder la cuenta
+     de fondeo.
+
+  Si falla una sola, el bot queda descartado como fuente de ventaja y no se reajusta.
+- **Resultado (19-11): SUSPENDE.** Solo cumple la regla 1. El bot queda descartado como fuente de ventaja. Sigue en la
+  app como un bot más, sin cambios, y no se reajusta.
+
+  | | Operaciones | Acierto | Media por operación | Total | Peor caída | Trimestres en positivo |
+  |---|---|---|---|---|---|---|
+  | Cripto, 2 años (BTC y ETH, `binanceusdm`) | 916 | 36 % | −0,17 R (el bot esperaba +0,14) | −156 R = −31.119 | 158 R | 0 de 9 |
+  | Acciones, 60 días (Yahoo, no cuenta) | 193 | 47 % | +0,02 R (esperaba +0,08) | +3,4 R = +687 | 8,4 R | 1 de 2 |
+
+  - En cripto, el lado contrario de las mismas apuestas también pierde (−0,20 R): los escenarios no aciertan el
+    lado, y los costes se lo comen todo.
+  - La media de todas las apuestas posibles fue −0,30 R, así que elegir las 5 mejores mejora algo frente a operar
+    todo, pero sigue perdiendo.
+  - Las acciones, con 39 días y 193 operaciones, no demuestran nada (regla 5).
+  - Comprobación nueva en `selfcheck.py scenarios`, punto 4: si se tocan las velas futuras, lo que el bot
+    esperaba no cambia. Se rompió dos veces a propósito (ver la vela de la decisión, y un ATR con la vela sin
+    cerrar) y falló las dos.
+  - Tres revisores independientes buscaron trampas en el script y no encontraron ninguna confirmada.
 
 ## Pendientes, por orden
 
@@ -327,3 +367,5 @@ del usuario.
     reglas y relevo de cuenta de fondeo en el motor en vivo, `Iniciar cuenta de fondeo.bat` y su panel en la app.
 14. **18-11, bot de escenarios.** "quiero agregar un bot que haga la mayor cantidad de escenarios ficticios de la
     acción y elija los 5 mejores". El sexto bot, `agents/scenario_agent.py`, y su tabla en la Sala de control.
+15. **19-11, examen del bot de escenarios.** "prepara el paso 3". `scenario_exam.py`: dos años de cripto fuera de
+    muestra. Suspende: −0,17 R por operación en 916 operaciones, 0 de 9 trimestres en positivo.

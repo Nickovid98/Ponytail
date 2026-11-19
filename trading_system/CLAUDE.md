@@ -66,6 +66,7 @@ app orb backtest alpaca topstepx funded scenarios`. Solo `backtest` es lenta (50
 | `utils/db.py` | SQLite y el estado compartido `kv` | `get_state`, `set_state`, `del_state` |
 | `utils/token_budget.py` | tope diario de tokens y auditoría de cada llamada a Claude | `llm_allowed`, `record_llm` |
 | `backtest.py` | simulación vela a vela, cuenta fondeada por generaciones, examen fuera de muestra | `run`, `successor`, `fold`, `walk_forward`, `yahoo`, `export` |
+| `scenario_exam.py` | examen fuera de muestra del bot de escenarios (cripto 2 años por CCXT, acciones 60 días por Yahoo) | `crypto_bets`, `stock_bets`, `chosen`, `report` |
 | `dashboard.py` | la app (Streamlit): una función por pestaña | `control_room`, `bots_room`, `boss_room`, `lab`, `settings` |
 | `selfcheck.py` | la batería: una función `check_*` por área | |
 

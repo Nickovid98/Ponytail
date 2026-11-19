@@ -1368,6 +1368,23 @@ async def check_scenarios():
         marked = {i: np.full((3, 4), float(i)) for i in range(1, scenario_agent.SESSION_BARS)}
         picked = set(ScenarioAgent._draw(np.random.default_rng(0), marked, 10)[:, 0])
         assert len(pools) == 77 and all(len(p) == 25 for p in pools.values()) and picked <= {8.0, 9.0, 10.0, 11.0, 12.0}
+        # 4) El examen (scenario_exam.py): tocar el futuro no cambia lo que el bot esperaba al decidir, y el
+        # resultado real sale de las velas que vinieron después.
+        import scenario_exam
+        config.SCENARIO_HOURS, config.SCENARIOS = 1, 500
+        m5 = crypto(0.0, n=1300).reset_index(drop=True)
+        m5["ts"] = pd.date_range("2026-01-01", periods=len(m5), freq="5min", tz="UTC")
+        base = scenario_exam.crypto_bets("X/USDT", m5, 1)
+        t = base[-1]["t"]
+        jump = m5.copy()
+        for col in ("open", "high", "low", "close"):  # se entra a la apertura de t; desde ahí, todo un 10 % más arriba
+            jump.loc[jump.ts > t if col == "open" else jump.ts >= t, col] *= 1.10
+        moved = scenario_exam.crypto_bets("X/USDT", jump, 1)
+        assert len(base) == len(moved) >= 10 and [b["er"] for b in base] == [b["er"] for b in moved], "mira el futuro"
+        last = moved[-1]
+        assert max(last["r"], last["r_other"]) > 1.0 and min(last["r"], last["r_other"]) == -1.0, last
+        picks = scenario_exam.chosen([{**b, "t": 0, "er": e} for b, e in zip(base[:7], (.3, -.1, .2, .5, .1, .4, .05))])
+        assert [p["er"] for p in picks] == [.5, .4, .3, .2, .1], picks
     finally:
         risk.nyse_open_since, risk.nyse_hours = real
         for k, v in snap.items():
