@@ -115,6 +115,78 @@ El usuario pidió "prepara el paso 3": examinar el bot 6 con al menos un año y 
     cerrar) y falló las dos.
   - Tres revisores independientes buscaron trampas en el script y no encontraron ninguna confirmada.
 
+## Estrategias con datos públicos oficiales (23-11, escrito antes de ver ningún resultado)
+
+El usuario pidió: "activa todo, haz pruebas hasta obtener éxito, agrega las funciones que sean necesarias, usa
+datos que están de acceso público de los gobiernos y las empresas en sus propias páginas".
+
+- **Qué es éxito y qué no.** "Hasta obtener éxito" no puede ser retocar una idea hasta que el pasado salga bonito:
+  eso es memorizar y en el futuro pierde (ver "Lo que enseñan esos resultados"). Éxito es una hipótesis, escrita
+  aquí antes de mirar, que gana neto de costes en años que no se usaron para elegirla y lo confirma después en
+  un periodo reservado que solo se mira una vez. Si ninguna lo consigue, se dice. Todo sigue en simulación: nada
+  de esto activa dinero real.
+- **Datos, todos públicos y sin clave.**
+  - SEC (EDGAR):
+    - fecha y hora de cada comunicado de resultados, que es el 8-K con el punto 2.02;
+    - compras de los propios directivos con su dinero, del formulario 4 en los conjuntos trimestrales de la SEC.
+  - State Street (SSGA): la lista de acciones del S&P 500, 400 y 600.
+  - Yahoo: precios diarios desde 2010, ajustados por splits y dividendos, y velas de 1 hora de los últimos 730
+    días.
+- **Sesgo conocido.** La lista de acciones es la de hoy, así que faltan las empresas que quebraron o salieron
+  del índice. Eso infla los resultados de comprar. Para no engañarse, cada operación se mide contra la media de
+  su mismo grupo (500, 400 o 600) en los mismos días. Ese grupo tiene el mismo sesgo y se cancela en gran parte.
+- **Costes por lado:** comisión 0,005 % más deslizamiento de 0,02 % (S&P 500), 0,05 % (400) o 0,10 % (600).
+  La cobertura con el índice cuesta 0,01 % por lado. No se cobra el préstamo de acciones en cortos (es pequeño
+  a estos plazos; queda anotado).
+- **Periodos (H1 a H3, diarias):**
+  - entrenamiento 2010–2017, que solo sirve para elegir la variante;
+  - examen 2018–2022;
+  - reservado del 01-01-2023 a hoy, que se mira una sola vez y solo si pasa el examen.
+- **Hipótesis.** Todas se basan en estudios publicados, no salen de buscar en los datos. En ninguna se entra
+  antes del cierre del día siguiente a que el dato sea público.
+  - **H1, compras de directivos.** Sostén: Lakonishok y Lee 2001; Cohen, Malloy y Pomorski 2012.
+    - Se compra la acción cuando sus consejeros o directivos la compran en bolsa (código P). La operación se mide
+      contra su grupo.
+    - Variantes: cualquier compra o al menos 2 directivos distintos en 30 días; cualquier importe o al menos
+      100.000 USD en 30 días; mantener 5, 21 o 63 sesiones. Son 12 variantes.
+  - **H2, deriva tras los resultados.** Sostén: Chan, Jegadeesh y Lakonishok 1996; Brandt y otros 2008.
+    - La reacción es la diferencia frente a su grupo desde el cierre anterior al comunicado hasta el cierre del
+      día siguiente.
+    - Se compra si esa reacción está en el 10 % (o 20 %) más alto de las del último año, y se vende en corto si
+      está en el más bajo.
+    - Se mantiene 5, 21 o 63 sesiones. Son 6 variantes.
+  - **H3, prima de los días de resultados.** Sostén: Frazzini y Lamont 2007; Barber y otros 2013.
+    - Fecha esperada = la del mismo trimestre del año anterior + 364 días. No se usa la fecha real, que todavía
+      no se conoce.
+    - Se compra 3, 5 o 10 sesiones antes y se vende al cierre del día siguiente a la fecha esperada. Son 3
+      variantes.
+  - **H4, hueco de resultados en el día (velas de 1 h, últimos 730 días; la única que encaja con la cuenta de
+    fondeo, que cierra todo cada día).**
+    - Condiciones: el día del primer precio tras el comunicado, la acción abre al menos un 3 % por encima (o
+      por debajo) del cierre anterior y la primera hora cierra en ese mismo sentido.
+    - Entrada a las 10:30 en ese sentido. Stop al otro extremo de la primera hora y objetivo a 2R. Si la vela
+      toca los dos, cuenta el stop. Si no toca ninguno, se sale al cierre.
+    - 200 de riesgo, como mucho 3 al día (los huecos más grandes) y las reglas de la cuenta de fondeo.
+    - Sin variantes: todo el periodo es examen.
+- **Cómo se elige y qué aprueba.**
+  - **Elección (H1 a H3).** En el entrenamiento se elige la variante con más t-estadístico. Se calcula sobre la
+    rentabilidad mensual de la cartera de todas las posiciones abiertas, neta de costes, y la variante necesita
+    al menos 100 operaciones. Si la mejor no llega a t = 2, la hipótesis se descarta sin examen.
+  - **Examen (H1 a H3).** Exige las tres cosas: al menos 100 operaciones, t ≥ 2,5 y al menos 3 de los 5 años en
+    positivo.
+  - **Periodo reservado (H1 a H3).** Exige al menos 100 operaciones, resultado positivo y t ≥ 1,65.
+  - **H4.** Exige al menos 100 operaciones y t ≥ 2,5 sobre el resultado diario. Además, cada uno de sus dos años
+    tiene que salir positivo por separado y no puede perder la cuenta de fondeo simulada.
+  - **Por qué 2,5 y no 2.** Son 4 hipótesis a la vez: con 2 saldría una ganadora por pura suerte demasiadas
+    veces (corrección de Bonferroni).
+  - **Si todas fallan.** Cualquier ronda nueva se escribe aquí antes, con un umbral más alto que cuente las
+    anteriores (t ≥ 2,8 si se llega a 8 hipótesis).
+- **Qué se activa pase lo que pase (en simulación).**
+  - El motor de la cuenta de fondeo.
+  - El calendario del bot Macro: no se abren operaciones nuevas cerca de anuncios de la Reserva Federal y de los
+    datos de la oficina de estadísticas laborales (IPC, empleo).
+  - Lo que apruebe, convertido en bot.
+
 ## Pendientes, por orden
 
 Los pendientes 1 y 5 solo se pueden comprobar en el ordenador del usuario; desde la nube fue imposible.
