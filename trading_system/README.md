@@ -83,7 +83,7 @@ numéricas (`features`) en las que se basó.
 | Agente | Linaje | Qué calcula | Velas | Cada |
 |---|---|---|---|---|
 | Historiador | `Market_Historian` | Regresión sobre log-precio, R², desviación en σ, estacionalidad horaria | 1h | 3 min |
-| Macro | `Macro_Watcher` | Titulares (Alpha Vantage + RSS) y calendario de eventos | — | 15 min |
+| Macro | `Macro_Watcher` | Titulares (Alpha Vantage + RSS) y calendario oficial: Reserva Federal e IPC y empleo de la BLS | — | 15 min |
 | SMC | `SMC_Scalper` | BOS / CHoCH, order blocks, FVG, barridos y pools de liquidez | 5m (acciones 1h) | 1 min |
 | Wyckoff | `Wyckoff_Volume` | Fase de Wyckoff, POC, HVN y área de valor | 1h | 3 min |
 | Tendencia | `Trend_Sentiment` | EMA 50/200, MACD y RSI en 4H y 1D, desequilibrio del libro | 4h, 1d | 3 min |
@@ -440,6 +440,26 @@ velas de 1 hora, y solo los últimos 60 días en velas de 5 minutos. El motor en
 vivo no tiene todavía una fuente de precios de acciones: esta estrategia solo
 se puede simular.
 
+## Datos públicos oficiales (`utils/public_data.py`, `event_lab.py`)
+
+Fuentes gratuitas y sin clave, con copia en `data/public/` (fuera de git):
+
+- **SEC (EDGAR).** Hora exacta de cada comunicado de resultados (8-K, punto 2.02), las compras y ventas que
+  declaran los directivos (formulario 4) y el valor en bolsa de todas las empresas en cada fecha.
+- **State Street.** La lista del S&P 500, 400 y 600.
+- **Reserva Federal y BLS.** El calendario de anuncios.
+- **Yahoo.** Precios diarios desde 2008 y velas de 1 hora de casi tres años.
+
+`event_lab.py` examina cuatro ideas publicadas que usan esos datos. Las reglas, los periodos y el criterio de
+aprobado están en `ESTADO.md`, escritos antes de mirar ningún resultado:
+
+```bash
+venv/bin/python event_lab.py download   # la primera vez, una hora o más
+venv/bin/python event_lab.py train      # elige una variante de cada idea, solo con 2010-2017
+venv/bin/python event_lab.py exam       # la examina en 2018-2022
+venv/bin/python event_lab.py holdout    # una sola vez: de 2023 a hoy, solo lo que aprobó
+```
+
 ## La app (`dashboard.py`)
 
 Solo escucha en `localhost` (`.streamlit/config.toml`): tiene el kill switch y
@@ -490,8 +510,10 @@ sandbox y en real los stops viven en el exchange.
   liquidez; en mercados rápidos el real será peor.
 - **No es alta frecuencia.** Opera cripto por CCXT y, solo en simulación,
   acciones de EE. UU. con precios de Yahoo (CCXT no conecta con Forex).
-- **No hay calendario económico en vivo.** `macro_events.csv` se mantiene a
-  mano; el agente macro veta entradas 30 minutos antes y después de cada evento.
+- **Calendario oficial a medias.** El agente macro veta entradas 30 minutos antes y después de cada decisión de
+  la Reserva Federal (su web se lee sola cada semana) y de cada IPC y dato de empleo de la BLS. La BLS bloquea las
+  descargas automáticas, así que sus fechas están copiadas a mano en `utils/public_data.py` hasta diciembre de 2027.
+  Cualquier otro evento se añade a mano en `macro_events.csv`.
 - **Probado sin red.** `selfcheck.py` cubre riesgo y costes, decisión, ciclo
   completo de una operación, límites, kill switch, modo manual, evolución
   (muerte, mutación, persistencia tras reinicio), tokens, alertas, el broker

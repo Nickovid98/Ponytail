@@ -30,7 +30,11 @@ os.environ.update(
     MAX_LEVERAGE="3", MAX_OPEN_POSITIONS="2", MIN_NOTIONAL="10", DAILY_LOSS_LIMIT_PCT="3",
     TOTAL_LOSS_LIMIT_USD="500", DECISION_THRESHOLD="0.25", MIN_AGENTS="3", COOLDOWN_S="900",
     FEE_PCT="0.075", START_MODE="AUTO", NEWS_RSS_URLS="", ALPHAVANTAGE_API_KEY="prueba",
-    ANTHROPIC_API_KEY="", ANTHROPIC_AUTH_TOKEN="", MACRO_EVENTS_FILE=os.path.join(TMP, "eventos.csv"))
+    ANTHROPIC_API_KEY="", ANTHROPIC_AUTH_TOKEN="", MACRO_EVENTS_FILE=os.path.join(TMP, "eventos.csv"),
+    PUBLIC_DATA_DIR=os.path.join(TMP, "public"))
+os.makedirs(os.path.join(TMP, "public"))
+with open(os.path.join(TMP, "public", "fomc.json"), "w") as _f:  # copia reciente del calendario: nada sale a la red
+    _f.write('["2030-01-30"]')
 
 import numpy as np
 import pandas as pd
@@ -49,7 +53,7 @@ from agents.macro_agent import MacroAgent, MacroOutput, Verdict, upcoming_event
 from agents.sentiment_agent import SentimentAgent
 from agents.smc_agent import SMCAgent
 from agents.wyckoff_agent import WyckoffAgent
-from utils import alpha_vantage, cache_manager, db, notifier, token_budget, trade_logger
+from utils import alpha_vantage, cache_manager, db, notifier, public_data, token_budget, trade_logger
 from utils import risk_manager as risk
 from utils.exchange import CcxtBroker, Market, PaperBroker, make_exchange
 from utils.topstepx import (TopstepBroker, TopstepClient, TopstepError, TopstepMarket,
@@ -501,6 +505,8 @@ async def check_ccxt_broker():
 
 async def check_macro():
     now = dt.datetime.now(dt.timezone.utc)
+    official = []  # el calendario oficial (Reserva Federal y BLS) bajo control: la hora real no influye
+    real_calendar, public_data.calendar = public_data.calendar, lambda days=7: list(official)
     config.MACRO_EVENTS_FILE.write_text(
         f"# fecha UTC, evento, impacto\n{now + dt.timedelta(minutes=10):%Y-%m-%dT%H:%M:%SZ},IPC EEUU,high\n", "utf-8")
     assert upcoming_event() == "IPC EEUU"
@@ -508,6 +514,13 @@ async def check_macro():
     assert s.veto and s.direction == "NEUTRAL"
     config.MACRO_EVENTS_FILE.write_text(f"{now + dt.timedelta(hours=3):%Y-%m-%dT%H:%M:%SZ},FOMC,high\nbasura\n", "utf-8")
     assert upcoming_event() is None
+    # Los anuncios oficiales vetan entradas ±BLACKOUT_MIN sin tocar el CSV; fuera de ese margen, no.
+    official[:] = [(now + dt.timedelta(minutes=25), "Decisión de tipos de la Reserva Federal (FOMC)")]
+    assert upcoming_event() == "Decisión de tipos de la Reserva Federal (FOMC)"
+    assert (await MacroAgent().run(SYM)).veto
+    official[:] = [(now - dt.timedelta(minutes=31), "IPC de EE. UU. (BLS)"), (now + dt.timedelta(minutes=31), "x")]
+    assert upcoming_event() is None
+    official[:] = [(now + dt.timedelta(days=2), "IPC de EE. UU. (BLS)")]
 
     calls = []
 
@@ -520,7 +533,8 @@ async def check_macro():
     # Respuesta "endpoint premium": sin titulares y SIN reintentar en cada ciclo.
     alpha_vantage._get = fake_get({"Information": "This is a premium endpoint."})
     assert await alpha_vantage.headlines() == [] and await alpha_vantage.headlines() == [] and len(calls) == 1
-    assert "sin titulares" in (await MacroAgent().run(SYM)).rationale.lower()
+    quiet = (await MacroAgent().run(SYM)).rationale
+    assert "sin titulares" in quiet.lower() and "próximo anuncio oficial: IPC de EE. UU. (BLS)" in quiet, quiet
 
     cache_manager.clear()
     alpha_vantage._av_last = 0.0
@@ -549,6 +563,12 @@ async def check_macro():
     agent.system = lambda: "PROMPT DE LA v5"
     assert (await agent.run(SYM)).direction == "LONG" and fake.n == 2
     config.DAILY_TOKEN_BUDGET = 200_000
+    public_data.calendar = real_calendar
+    # El calendario real, desde la copia de la Reserva Federal (sin red) y las fechas de la BLS: hora de Nueva York.
+    cal = public_data.calendar()
+    assert (dt.datetime(2030, 1, 30, 19, 0, tzinfo=dt.timezone.utc), "Decisión de tipos de la Reserva Federal (FOMC)") in cal
+    assert (dt.datetime(2026, 12, 10, 13, 30, tzinfo=dt.timezone.utc), "IPC de EE. UU. (BLS)") in cal  # 8:30 en invierno
+    assert (dt.datetime(2027, 7, 2, 12, 30, tzinfo=dt.timezone.utc), "Empleo de EE. UU. (BLS)") in cal  # 8:30 en verano
 
 
 def sessions(today, quiet=6):  # `quiet` sesiones tranquilas (volumen 10 por vela) y la de hoy
@@ -1773,10 +1793,235 @@ async def _check_funded():
     assert ok.returncode == 0 and ok.stdout.split()[-1] == "0.0", ok  # la pérdida máxima sustituye al límite total
 
 
+def check_public():
+    """Datos públicos (SEC, State Street, Reserva Federal) y el laboratorio de eventos: lo que se lee de cada fuente y
+    que ninguna hipótesis entra antes de que el dato sea público ni mira el futuro."""
+    import io
+    import zipfile
+    import event_lab as lab
+    real_fetch, real_filings = public_data.fetch, public_data.filings
+    try:
+        # 1) Excel de State Street sin openpyxl: cabecera donde esté, BRK.B -> BRK-B, sin efectivo ni guiones.
+        def xlsx(rows):
+            ns = 'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
+            strings = sorted({c for r in rows for c in r if c})
+            cell = lambda r, j, c: f'<c r="{"ABCD"[j]}{r}" t="s"><v>{strings.index(c)}</v></c>' if c else ""
+            sheet = "".join(f'<row r="{i + 1}">{"".join(cell(i + 1, j, c) for j, c in enumerate(r))}</row>'
+                            for i, r in enumerate(rows))
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w") as z:
+                z.writestr("xl/sharedStrings.xml", f"<sst {ns}>" + "".join(f"<si><t>{s}</t></si>" for s in strings) + "</sst>")
+                z.writestr("xl/worksheets/sheet1.xml", f"<worksheet {ns}><sheetData>{sheet}</sheetData></worksheet>")
+            return buf.getvalue()
+
+        fund = xlsx([["Fund Name:", "SPDR"], [], ["Name", "Ticker", "Weight"], ["APPLE INC", "AAPL", "7"],
+                     ["BERKSHIRE HATHAWAY INC CL B", "BRK.B", "1"], ["US DOLLAR", "CASH_USD", "0.1"], ["", "-", ""],
+                     ["NVIDIA CORP", "", "5"]])
+        public_data.fetch = lambda url, kind="web", tries=5: fund
+        u = public_data.universe(days=0)
+        assert list(u.ticker) == ["AAPL", "BRK-B"] and set(u.group) == {"500"}, u  # las tres listas iguales: gana la 1.ª
+
+        # 2) Formularios 4: compras (P/A) y ventas (S/D) de consejeros y directivos; enmiendas y 10 % fuera.
+        def tsv(header, rows):
+            return "\t".join(header) + "\n" + "".join("\t".join(r) + "\n" for r in rows)
+        z = io.BytesIO()
+        with zipfile.ZipFile(z, "w") as f:
+            f.writestr("SUBMISSION.tsv", tsv(["ACCESSION_NUMBER", "FILING_DATE", "DOCUMENT_TYPE", "ISSUERCIK"], [
+                ["a1", "31-JAN-2024", "4", "0000000111"], ["a2", "01-FEB-2024", "4/A", "0000000111"],
+                ["a3", "02-FEB-2024", "4", "0000000111"], ["a4", "05-FEB-2024", "4", "0000000222"]]))
+            f.writestr("REPORTINGOWNER.tsv", tsv(["ACCESSION_NUMBER", "RPTOWNERCIK", "RPTOWNER_RELATIONSHIP"], [
+                ["a1", "0000000009", "Director"], ["a2", "0000000009", "Director"], ["a3", "0000000008", "Officer"],
+                ["a4", "0000000007", "TenPercentOwner"]]))
+            f.writestr("NONDERIV_TRANS.tsv", tsv(["ACCESSION_NUMBER", "TRANS_CODE", "TRANS_ACQUIRED_DISP_CD",
+                                                  "TRANS_SHARES", "TRANS_PRICEPERSHARE"], [
+                ["a1", "P", "A", "100", "10"], ["a1", "P", "A", "50", "10"], ["a1", "M", "A", "999", "1"],
+                ["a2", "P", "A", "1", "1"], ["a3", "S", "D", "10", "20"], ["a3", "P", "D", "5", "5"],
+                ["a4", "P", "A", "10", "10"]]))
+        public_data.fetch = lambda url, kind="web", tries=5: z.getvalue()
+        ins = public_data.insider(2024, 1).sort_values("filed").reset_index(drop=True)
+        assert list(ins.code) == ["P", "S", "P"] and list(ins.value) == [1500.0, 200.0, 100.0], ins
+        assert list(ins.insider) == [True, True, False] and ins.filed[0] == pd.Timestamp("2024-01-31"), ins
+
+        # 3) Reuniones del FOMC de la web de la Reserva Federal: último día; las de dos meses, en el segundo.
+        html = ("<h4>2027 FOMC Meetings</h4>"
+                '<div class="fomc-meeting__month x"><strong>January</strong></div><div class="fomc-meeting__date y">26-27</div>'
+                '<div class="fomc-meeting__month x"><strong>March</strong></div><div class="fomc-meeting__date y">16-17*</div>'
+                '<div class="fomc-meeting__month x"><strong>Apr/May</strong></div><div class="fomc-meeting__date y">30-1</div>'
+                '<div class="fomc-meeting__month x"><strong>June</strong></div><div class="fomc-meeting__date y">8 (notation vote)</div>')
+        assert public_data.fomc_dates(html) == [dt.date(2027, 1, 27), dt.date(2027, 3, 17), dt.date(2027, 5, 1)]
+
+        # 4) Comunicados de resultados: 8-K con el punto 2.02; si hay dos en menos de 20 días, el primero.
+        t0 = pd.Timestamp("2024-05-22 20:21:29", tz="UTC")
+        public_data.filings = lambda cik, since="2009-01-01", days=1: pd.DataFrame({
+            "form": ["8-K", "8-K", "8-K", "10-Q", "8-K"], "items": ["2.02,9.01", "2.02", "5.02", "", "9.01,2.02"],
+            "accepted": [t0, t0 + pd.Timedelta(days=5), t0 + pd.Timedelta(days=30), t0, t0 + pd.Timedelta(days=91)]})
+        assert list(public_data.earnings(1)) == [t0, t0 + pd.Timedelta(days=91)]
+    finally:
+        public_data.fetch, public_data.filings = real_fetch, real_filings
+
+    # 5) Limpieza de precios: fuera los errores demostrables, dentro los saltos reales aunque sean enormes.
+    idx = pd.bdate_range("2020-01-01", periods=12)
+    base = np.linspace(10, 11, 12)
+    adj = pd.DataFrame({"ERR": base.copy(), "DIV": base.copy(), "SPK": base.copy(), "REAL": base.copy(),
+                        "PENNY": base.copy()}, index=idx)
+    close = adj.copy()
+    adj.loc[idx[5]:, "ERR"] *= 1.61  # ajuste roto de Yahoo: el ajustado salta un 61 % y el cierre no
+    adj.loc[:idx[4], "DIV"] *= 0.99  # dividendo del 1 %: el ajustado de antes baja un poco
+    for frame in (adj, close):
+        frame.loc[idx[6], "SPK"] *= 6  # +500 % y vuelta al día siguiente: error
+        frame.loc[idx[6]:, "REAL"] *= 2  # +100 % que se queda: real
+        frame.loc[:idx[5], "PENNY"] *= 0.05  # por debajo de 1 USD hasta el día 5 (bolsa de chicharros): no cuenta
+    r = lab.clean(adj, close)
+    assert np.isnan(r.loc[idx[5], "ERR"]) and abs(r.loc[idx[6], "ERR"]) < 0.05
+    assert not r.DIV.iloc[1:].isna().any()
+    assert r.SPK.iloc[6:8].isna().all() and not r.SPK.iloc[[5, 8]].isna().any()
+    assert abs(r.loc[idx[6], "REAL"] - (2 * base[6] / base[5] - 1)) < 1e-9  # una posición en corto lo habría pagado
+    assert r.PENNY.iloc[:7].isna().all() and not r.PENNY.iloc[7:].isna().any()
+
+    # 6) Tamaño en cada fecha (SEC): cada fin de mes, puesto entre todas las empresas con dato de los últimos 15 meses.
+    days = pd.bdate_range("2012-01-02", "2013-12-31")
+    fl = pd.DataFrame({"cik": [1, 2, 3, 4, 1], "end": pd.to_datetime(["2011-06-30"] * 4 + ["2013-02-28"]),
+                       "val": [9e9, 5e9, 7e15, 4e5, 1e9]})  # 7e15 y 4e5: valores imposibles, fuera
+    real_ranks, lab.RANKS = lab.RANKS, (1, 2, 3)
+    try:
+        g = lab.pit_groups(fl, days, [1, 2, None, 4])
+    finally:
+        lab.RANKS = real_ranks
+    at = lambda d: list(g[days.get_loc(pd.Timestamp(d))])
+    assert at("2012-01-02") == [1, 2, 0, 0] and at("2012-09-28") == [1, 2, 0, 0], g[:3]
+    assert at("2012-10-01") == [0, 0, 0, 0]  # el dato de junio de 2011 caduca a los 15 meses (fin de septiembre)
+    assert at("2013-03-01") == [1, 0, 0, 0] and at("2013-02-28") == [0, 0, 0, 0]  # vale desde el mes siguiente
+
+    # 7) Panel falso: el primer día del precio que reacciona y las entradas, siempre después de que el dato sea público.
+    gen = np.random.default_rng(11)
+    names = ["AAA", "AAB", "BBB", "BBC", "CCC", "CCD"]
+    dates = pd.bdate_range("2015-01-01", periods=900)
+    rets = gen.normal(0, 0.01, (len(dates), 6))
+    rets[0] = np.nan
+    codes = np.tile(np.array([1, 1, 2, 2, 3, 3], np.int8), (len(dates), 1))
+
+    def panel(r, grp=codes):
+        return object.__new__(lab.Panel).build(dates, names, r, np.ones(r.shape, bool), grp,
+                                               dict(zip(names, ["500", "500", "400", "400", "600", "600"])),
+                                               {k + 1: t for k, t in enumerate(names)})
+
+    p = panel(rets)
+    wed = pd.Timestamp("2016-05-18")  # miércoles
+    i = p.at_or_after(wed)
+    assert p.day0(pd.Timestamp("2016-05-18 20:21", tz="UTC")) == i + 1  # 16:21 en Nueva York: la sesión siguiente
+    assert p.day0(pd.Timestamp("2016-05-18 11:00", tz="UTC")) == i  # 7:00: antes de abrir, la misma
+    assert p.day0(pd.Timestamp("2016-05-18 15:00", tz="UTC")) == i  # 11:00, con la bolsa abierta: la misma
+    assert p.day0(pd.Timestamp("2016-05-21 14:00", tz="UTC")) == p.at_or_after("2016-05-23")  # sábado: el lunes
+    assert p.day0(pd.Timestamp("2014-12-20 14:00", tz="UTC")) is None  # antes del primer precio: fuera
+    (public_data.DIR / "sec").mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({"x": [1]}).to_parquet(public_data.DIR / "sec" / "1.parquet")
+    real_earnings = public_data.earnings
+    public_data.earnings = lambda cik, days=1: pd.Series(pd.to_datetime(
+        ["2014-12-20 14:00", "2015-01-01 12:00", "2016-05-18 20:21"], utc=True)) if cik == 1 else pd.Series([], dtype="datetime64[ns, UTC]")
+    try:
+        assert list(lab.earnings_events(p).d0) == [i + 1]  # sin precio anterior (antes o en el primer día): fuera
+    finally:
+        public_data.earnings = real_earnings
+    clean_r = np.nan_to_num(rets)
+
+    def excess(c, g, a, b):  # rentabilidad menos la media de su grupo, sesiones a+1..b
+        return (clean_r[a + 1:b + 1, c] - clean_r[a + 1:b + 1][:, codes[0] == g].mean(1)).sum()
+
+    # H1: compra presentada el día d -> entra al cierre de la sesión siguiente; 2 directivos o 100.000 en 30 días.
+    d = p.dates[300]
+    buys = pd.DataFrame({"ticker": ["AAA", "AAA"], "filed": [d, p.dates[310]], "owner": [9, 8], "value": [50e3, 60e3]})
+    one = lab.h1(p, buys, {"insiders": 1, "usd": 0, "hold": 5})
+    assert list(one.e) == [301, 311] and list(one.x) == [306, 316], one
+    assert abs(one.ret.iloc[0] - (excess(0, 1, 301, 306) - lab.COST["500"])) < 1e-12
+    assert list(lab.h1(p, buys, {"insiders": 2, "usd": 0, "hold": 5}).e) == [311]
+    assert list(lab.h1(p, buys, {"insiders": 1, "usd": 100_000, "hold": 5}).e) == [311]
+    assert list(lab.h1(p, buys, {"insiders": 1, "usd": 0, "hold": 21}).e) == [301]  # una posición por acción a la vez
+    # El tamaño cuenta al entrar: sin grupo ese día no se opera; perder el grupo después no anula la operación.
+    moved = codes.copy()
+    moved[306:, 0] = 0
+    assert list(lab.h1(panel(rets, moved), buys, {"insiders": 1, "usd": 0, "hold": 5}).e) == [301]
+    moved[:302, 0] = 0
+    assert lab.h1(panel(rets, moved), buys.iloc[:1], {"insiders": 1, "usd": 0, "hold": 5}).empty
+
+    # H2: reacción del cierre anterior al comunicado al cierre del día siguiente, entrada en la sesión posterior; los
+    # umbrales solo usan reacciones ya conocidas, así que tocar las de después no cambia ninguna decisión anterior.
+    pre = [p.dates[20 + k].tz_localize(public_data.NY) + pd.Timedelta(hours=7) for k in range(700)]
+    ev = pd.DataFrame({"ticker": [names[k % 6] for k in range(700)], "d0": [20 + k for k in range(700)], "accepted": pre})
+    v = {"tail": 0.2, "hold": 5}
+    base_h2 = lab.h2(p, ev, v)
+    assert len(base_h2) > 50 and all(e - 2 in set(ev[ev.ticker == t].d0) for t, e in zip(base_h2.ticker, base_h2.e))
+    cut = 500
+    later = rets.copy()
+    later[cut:] *= 10
+    keep = lambda df: [(t, e, s) for t, e, s in zip(df.ticker, df.e, df.side) if e < cut]
+    assert keep(base_h2) == keep(lab.h2(panel(later), ev, v)), "H2 mira el futuro"
+    # Tras el cierre del día A: la reacción es solo la sesión A+1 y se entra al cierre de A+2, como antes de abrir.
+    a = 760
+    late = p.dates[a].tz_localize(public_data.NY) + pd.Timedelta(hours=16, minutes=30)
+    after_close = pd.DataFrame({"ticker": ["AAA"], "accepted": [late], "d0": [a + 1]})
+    spiked = rets.copy()
+    spiked[a + 1, 0], spiked[a, 0], spiked[a + 2, 0] = 0.5, -0.9, -0.9  # solo cuenta el +50 % de la sesión A+1
+    both_ev = pd.concat([ev[ev.d0 < a - 5], after_close], ignore_index=True)
+    t2 = lab.h2(panel(spiked), both_ev, v)
+    assert [(t, e, s) for t, e, s in zip(t2.ticker, t2.e, t2.side)][-1] == ("AAA", a + 2, 1), t2.tail()
+
+    # H3: fecha esperada = la de hace un año + 364 días; entra `before` sesiones antes y sale el día siguiente.
+    h3 = lab.h3(p, pd.DataFrame({"ticker": ["BBB"], "d0": [100]}), {"before": 5})
+    due = p.at_or_after(p.dates[100] + pd.Timedelta(days=364))
+    assert list(h3.e) == [due - 5] and list(h3.x) == [due + 1]
+
+    # Estadísticas: una sola operación = su resultado; el coste, el primer día.
+    s = lab.stats(p, one.iloc[:1], p.dates[290], p.dates[330])
+    assert s["n"] == 1 and abs(sum(s["years"].values()) - one.ret.iloc[0]) < 2e-4, (s, one.ret.iloc[0])
+
+    # 8) H4 con velas de 1 hora: hueco >= 3 %, primera hora a favor, entrada 10:30, stop al otro extremo, 2R; el coste
+    # dentro de los 200 de riesgo, como el motor.
+    def session(day, bars):
+        ts = [pd.Timestamp(f"{day} 09:30", tz=public_data.NY) + pd.Timedelta(hours=k) for k in range(len(bars))]
+        return pd.DataFrame(bars, columns=["open", "high", "low", "close"], index=pd.DatetimeIndex(ts))
+
+    def h4_with(bars0):
+        prev = session("2016-05-18", [(99, 100, 98, 99.5)] * 6 + [(99.5, 100.2, 99.4, 100)])
+        h = pd.concat([prev, session("2016-05-19", bars0)])
+        public_data.price_file("hourly", "AAA").parent.mkdir(parents=True, exist_ok=True)
+        h.to_parquet(public_data.price_file("hourly", "AAA"))
+        ev4 = pd.DataFrame({"ticker": ["AAA"], "accepted": [pd.Timestamp("2016-05-18 21:00", tz="UTC")],
+                            "d0": [p.at_or_after("2016-05-19")]})
+        return lab.h4(p, ev4)
+
+    rest = [(106, 106.5, 105.5, 106)] * 5
+    cost = lab.FEE + lab.SLIP["500"]
+    win = h4_with([(104, 105.5, 103.5, 105), (105, 108.5, 104.5, 108)] + rest)
+    shares = int(200 // (1.5 + (105 + 103.5) * cost))
+    assert len(win) == 1 and win.side[0] == 1 and win.exit[0] == 108 and win.shares[0] == shares, win
+    assert abs(win.pnl[0] - (shares * 3 - shares * 213 * cost)) < 1e-6
+    both = h4_with([(104, 105.5, 103.5, 105), (105, 108.5, 103.0, 104)] + rest)
+    assert both.exit[0] == 103.5 and -200 <= both.pnl[0] <= -198.4, both  # toca stop y objetivo: el stop, -200 con costes
+    assert h4_with([(104, 105.5, 103.5, 103.8), (105, 108.5, 104.5, 108)] + rest).empty  # primera hora en contra
+    assert h4_with([(102, 105.5, 101.5, 105), (105, 108.5, 104.5, 108)] + rest).empty  # hueco de solo 2 %
+    flat = h4_with([(104, 105.5, 103.5, 105), (105, 106, 104.5, 105.5)] + rest)
+    assert flat.exit[0] == 106 and len(flat.path[0]) == 6, flat  # sin stop ni objetivo: sale al cierre
+
+    # Reglas de la cuenta de fondeo vela a vela: a 750 de pérdida en el día se cierra todo; tocar el suelo con lo
+    # flotante pierde la cuenta aunque el día acabe en positivo.
+    day1, day2, day3 = (pd.Timestamp(f"2024-01-0{k}", tz=public_data.NY) for k in (2, 3, 4))
+    at_h = lambda day, h: day + pd.Timedelta(hours=h)
+    kill = pd.DataFrame({"day": [day1.tz_localize(None)] * 3, "pnl": [100.0] * 3, "R": [0.5] * 3,
+                         "path": [{at_h(day1, 11): (-260.0, -270.0), at_h(day1, 15): (100.0, 100.0)}] * 3})
+    st = lab.h4_stats(kill)
+    assert abs(st["total"] + 810) < 1e-9, st  # cerró todo a -780 flotantes (-810 con costes), no esperó al +300
+    dip = pd.DataFrame({"day": [x.tz_localize(None) for x in (day1, day2, day3)], "pnl": [-700.0, -700.0, 400.0],
+                        "R": [-3.5, -3.5, 2.0],
+                        "path": [{at_h(day1, 15): (-700.0, -700.0)}, {at_h(day2, 15): (-700.0, -700.0)},
+                                 {at_h(day3, 11): (-650.0, -660.0), at_h(day3, 15): (400.0, 400.0)}]})
+    st = lab.h4_stats(dip)
+    assert st["accounts_lost"] == 1, st  # 48.600 - 650 toca el suelo de 48.000 aunque el día acabe en +400
+
+
 if __name__ == "__main__":
     checks = [check_cache, check_risk, check_agents, check_boss_decision, check_lifecycle, check_evolution,
               check_tokens_and_alerts, check_ccxt_broker, check_macro, check_optimizer, check_app, check_orb,
-              check_backtest, check_alpaca, check_topstepx, check_funded, check_scenarios]
+              check_backtest, check_alpaca, check_topstepx, check_funded, check_scenarios, check_public]
     names = [c.__name__[6:] for c in checks]
     wanted = set(sys.argv[1:])  # sin argumentos, todas; `selfcheck.py optimizer app` ejecuta solo esas dos
     if wanted - set(names):
@@ -1806,4 +2051,5 @@ if __name__ == "__main__":
         print("selfcheck OK: caché, riesgo y costes, 6 agentes, jefe, ciclo completo de operación, evolución "
               "(muerte, mutación, persistencia), tokens, alertas, broker CCXT, macro, recompensas y optimizador, "
               "controles de la app, ORB, backtest con validación fuera de muestra, datos de Alpaca, TopstepX "
-              "(API falsa local, kill switch, sesión y frecuencia), acciones con Yahoo, cuenta de fondeo simulada y bot de escenarios")
+              "(API falsa local, kill switch, sesión y frecuencia), acciones con Yahoo, cuenta de fondeo simulada, bot de escenarios "
+              "y datos públicos (SEC, Reserva Federal, BLS) con su laboratorio")

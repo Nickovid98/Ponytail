@@ -181,6 +181,34 @@ datos que están de acceso público de los gobiernos y las empresas en sus propi
     veces (corrección de Bonferroni).
   - **Si todas fallan.** Cualquier ronda nueva se escribe aquí antes, con un umbral más alto que cuente las
     anteriores (t ≥ 2,8 si se llega a 8 hipótesis).
+- **Enmienda del 23-11, antes de ver ningún resultado.**
+  - **Qué la motiva.** Una revisión independiente del laboratorio (4 revisores y verificadores que intentaron
+    refutar cada hallazgo) confirmó 6 fallos. La medida cambia así; las hipótesis, las variantes y los
+    criterios siguen igual.
+  - **1. Tamaño en cada fecha.** La frase de arriba ("se cancela en gran parte") era falsa para H1: con la lista
+    de hoy entran empresas que entonces eran pequeñas y luego crecieron. En una simulación sin ninguna
+    información, eso dio un t falso de +1,2 a +3,5. Ahora:
+    - Cada mes se ordenan todas las empresas por su valor en bolsa en manos del público (`EntityPublicFloat`,
+      SEC). Se usa el dato de cada empresa de los últimos 15 meses, incluidas las que después quebraron.
+    - Puestos 1–500 = grupo 500, 501–900 = 400, 901–1500 = 600.
+    - Una acción solo se opera si estaba en uno de esos grupos al entrar. Se mide contra la media de las
+      acciones que estaban en ese mismo grupo ese día.
+    - Salir del grupo durante la operación no la anula, porque eso quitaría a las perdedoras. Las empresas sin
+      dato de tamaño quedan fuera, lo que pasa sobre todo con las pequeñas en 2010.
+    - Queda el sesgo de las empresas que eran grandes y ya no cotizan (en la simulación, de +0,1 a +1 % al año).
+  - **2. Filtro de datos.** Ya no se borra cualquier día de más del 75 %: eso también borraba días reales como
+    la subida de GME en 2021. Solo se borran los errores demostrables:
+    - días en que el precio ajustado y el cierre se separan más de 10 puntos (ajuste roto de Yahoo en escisiones);
+    - precios por debajo de 1 USD;
+    - subidas o bajadas de más del 75 % que se deshacen en 3 sesiones; se borran la ida y la vuelta.
+  - **3. H2, comunicados tras el cierre.** La reacción va del cierre anterior al comunicado al cierre del día
+    siguiente, como estaba escrito. Antes se medía un día de más.
+  - **4. Comunicados de antes de junio de 2009.** No hay precio anterior, así que se descartan. Además, los
+    precios empiezan ahora en junio de 2008.
+  - **5. H4 y la cuenta de fondeo, vigiladas en cada vela de 1 hora.** La cuenta se pierde si el saldo, contando
+    lo flotante, toca el suelo. A 750 de pérdida en el día se cierra todo y no se abre nada más. El coste
+    entra dentro de los 200 de riesgo, como en el motor.
+  - **6. Windows.** El archivo de CON no se podía leer (nombre reservado).
 - **Qué se activa pase lo que pase (en simulación).**
   - El motor de la cuenta de fondeo.
   - El calendario del bot Macro: no se abren operaciones nuevas cerca de anuncios de la Reserva Federal y de los

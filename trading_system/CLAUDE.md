@@ -44,7 +44,7 @@ consulta solo la sección que toque (`grep -n '^#' README.md`).
 
 `selfcheck OK` es obligatorio antes de cada commit; la pasada parcial sirve para iterar y no lo sustituye.
 Comprobaciones: `cache risk agents boss_decision lifecycle evolution tokens_and_alerts ccxt_broker macro optimizer
-app orb backtest alpaca topstepx funded scenarios`. Solo `backtest` es lenta (50 s).
+app orb backtest alpaca topstepx funded scenarios public`. Solo `backtest` es lenta (50 s).
 
 ## Mapa (salta con `grep -n "def nombre"`, no leas archivos enteros)
 
@@ -67,6 +67,8 @@ app orb backtest alpaca topstepx funded scenarios`. Solo `backtest` es lenta (50
 | `utils/token_budget.py` | tope diario de tokens y auditoría de cada llamada a Claude | `llm_allowed`, `record_llm` |
 | `backtest.py` | simulación vela a vela, cuenta fondeada por generaciones, examen fuera de muestra | `run`, `successor`, `fold`, `walk_forward`, `yahoo`, `export` |
 | `scenario_exam.py` | examen fuera de muestra del bot de escenarios (cripto 2 años por CCXT, acciones 60 días por Yahoo) | `crypto_bets`, `stock_bets`, `chosen`, `report` |
+| `utils/public_data.py` | datos públicos sin clave: SEC (resultados, formularios 4, tamaño), State Street, Reserva Federal, BLS, Yahoo | `universe`, `filings`, `earnings`, `insider`, `floats`, `daily`, `hourly`, `calendar` |
+| `event_lab.py` | laboratorio de H1-H4 con datos públicos (protocolo en `ESTADO.md`): `download`, `train`, `exam`, `holdout` | `Panel`, `clean`, `pit_groups`, `h1`-`h4`, `stats`, `h4_stats` |
 | `dashboard.py` | la app (Streamlit): una función por pestaña | `control_room`, `bots_room`, `boss_room`, `lab`, `settings` |
 | `selfcheck.py` | la batería: una función `check_*` por área | |
 

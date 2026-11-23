@@ -139,6 +139,7 @@ DISCORD_WEBHOOK_URL = _s("DISCORD_WEBHOOK_URL")
 # --- Almacenamiento --------------------------------------------------------
 DB_PATH = Path(_s("DB_PATH", str(ROOT / "trades_history.db")))
 CACHE_DIR = Path(_s("CACHE_DIR", str(ROOT / "data" / "cache")))
+PUBLIC_DATA_DIR = Path(_s("PUBLIC_DATA_DIR", str(ROOT / "data" / "public")))  # SEC, Reserva Federal, BLS y precios
 LOG_FILE = Path(_s("LOG_FILE", str(ROOT / "trading.log")))
 
 if BROKER == "topstepx":

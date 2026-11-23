@@ -5,6 +5,7 @@ titulares: una llamada cubre todos los activos y el veredicto queda en caché.
 Su system prompt lo entrega el gestor de evolución, con las lecciones de las
 versiones anteriores ya incorporadas.
 """
+import asyncio
 import datetime as dt
 import hashlib
 import logging
@@ -14,7 +15,7 @@ from pydantic import BaseModel
 
 import config
 from agents import Direction, Signal, neutral
-from utils import alpha_vantage, token_budget
+from utils import alpha_vantage, public_data, token_budget
 from utils import cache_manager as cache
 
 log = logging.getLogger("macro")
@@ -45,15 +46,15 @@ class MacroOutput(BaseModel):
 
 
 def upcoming_event(now: dt.datetime | None = None) -> str | None:
-    """Evento de alto impacto a menos de BLACKOUT_MIN minutos (antes o después)."""
-    # ponytail: el calendario es un CSV que mantienes a mano (fecha UTC, nombre,
-    # impacto). Techo: no se actualiza solo. Alpha Vantage no ofrece calendario
-    # económico; para automatizarlo, sustituir esta función por un proveedor
-    # que sí lo tenga (Trading Economics, Finnhub, FMP).
+    """Evento de alto impacto a menos de BLACKOUT_MIN minutos (antes o después): los oficiales (Reserva Federal y
+    BLS, de `public_data.calendar`) y los que añadas a mano en el CSV (fecha UTC, nombre, impacto)."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    for when, name in public_data.calendar():
+        if abs((when - now).total_seconds()) <= config.BLACKOUT_MIN * 60:
+            return name
     path = config.MACRO_EVENTS_FILE
     if not path.exists():
         return None
-    now = now or dt.datetime.now(dt.timezone.utc)
     for line in path.read_text(encoding="utf-8").splitlines():
         parts = [p.strip() for p in line.split(",")]
         if line.lstrip().startswith("#") or len(parts) < 2:
@@ -79,13 +80,16 @@ class MacroAgent:
         self.system = system or (lambda: SYSTEM)  # función: el prompt cambia cuando el agente muta
 
     async def run(self, symbol, market=None) -> Signal:
-        event = upcoming_event()
+        event = await asyncio.to_thread(upcoming_event)  # la copia del calendario se renueva por red una vez por semana
         if event:
             return neutral(self.name, symbol, f"Evento de alto impacto: {event} (±{config.BLACKOUT_MIN:.0f} min)",
                            veto=True)
         items = await alpha_vantage.headlines()
         if not items:
-            return neutral(self.name, symbol, "Sin titulares (revisa ALPHAVANTAGE_API_KEY o NEWS_RSS_URLS)")
+            now = dt.datetime.now(dt.timezone.utc)
+            nxt = next(((t, n) for t, n in public_data.calendar() if t > now), None)
+            then = f" · próximo anuncio oficial: {nxt[1]}, {nxt[0].astimezone(dt.timezone.utc):%d-%m %H:%M} UTC" if nxt else ""
+            return neutral(self.name, symbol, f"Sin titulares (revisa ALPHAVANTAGE_API_KEY o NEWS_RSS_URLS){then}")
         if self.client and token_budget.llm_allowed():
             v = (await self._verdicts(items)).get(symbol)
             if v:
