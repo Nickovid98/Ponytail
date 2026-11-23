@@ -1,6 +1,6 @@
 # Estado del proyecto
 
-Actualizado el 19-11-2026. Quien cierre una tarea actualiza este archivo en el mismo commit.
+Actualizado el 23-11-2026. Quien cierre una tarea actualiza este archivo en el mismo commit.
 
 ## En una pantalla
 
@@ -14,7 +14,11 @@ Actualizado el 19-11-2026. Quien cierre una tarea actualiza este archivo en el m
   precios de Yahoo, en largo y en corto, con relevo de cuenta. `selfcheck.py` pasa entero.
 - **Qué dice la investigación.** Con precios reales y después de costes, nada de lo probado gana dinero en datos
   que no había visto. No hay ventaja demostrada. Los objetivos del usuario no se han alcanzado en ninguna
-  simulación.
+  simulación. Tampoco con datos oficiales de la SEC (resultados, compras de directivos y tamaño de cada empresa en
+  cada fecha): el 23-11 suspendieron las cuatro ideas publicadas que se examinaron, y el bot de escenarios suspendió
+  el 19-11.
+- **Activado el 23-11 (simulación).** El bot Macro veta entradas 30 minutos antes y después de cada anuncio de la
+  Reserva Federal y de cada IPC y dato de empleo de la BLS. Se encendió el motor de la cuenta de fondeo.
 - **Recomendación dada al usuario.** No poner dinero ni pagar una evaluación de fondeo con este bot. Elegir entre
   parar o hacer una última prueba bien hecha ("acciones en juego" con datos de Alpaca) con el criterio de
   aprobado fijado de antemano. No ha contestado todavía.
@@ -214,6 +218,46 @@ datos que están de acceso público de los gobiernos y las empresas en sus propi
   - El calendario del bot Macro: no se abren operaciones nuevas cerca de anuncios de la Reserva Federal y de los
     datos de la oficina de estadísticas laborales (IPC, empleo).
   - Lo que apruebe, convertido en bot.
+- **Resultado (23-11): las cuatro suspenden.** Código en el commit dbff517, guardado antes de ver ningún resultado.
+  Panel: 1.502 acciones, de 2008-06-02 a 2026-11-20. Tenían grupo por tamaño 442 al empezar el entrenamiento y
+  948 al empezar el examen; el resto no tenía dato de la SEC o era más pequeño.
+  - **H1 a H3: descartadas en el entrenamiento, sin examen.** Ninguna variante llegó a t = 2 ni con los datos con
+    los que se elige. Todas las variantes, en 2010–2017, netas de costes y frente a su grupo:
+
+    | Variante | Ops | Media por op | t | Al año | Años + |
+    |---|---|---|---|---|---|
+    | H1 1 directivo, cualquier importe, 5 sesiones | 5.390 | −0,11 % | −2,32 | −7,4 % | 2 de 8 |
+    | H1 1 directivo, cualquier importe, 21 | 4.404 | −0,35 % | −2,28 | −3,2 % | 2 de 8 |
+    | H1 1 directivo, cualquier importe, 63 | 3.488 | −0,36 % | −0,48 | −0,6 % | 4 de 8 |
+    | H1 1 directivo, ≥ 100.000, 5 | 2.916 | −0,06 % | −1,00 | −4,2 % | 3 de 8 |
+    | H1 1 directivo, ≥ 100.000, 21 | 2.389 | −0,15 % | −0,77 | −1,5 % | 4 de 8 |
+    | H1 1 directivo, ≥ 100.000, 63 | 2.043 | +0,15 % | +0,09 | +0,1 % | 3 de 8 |
+    | H1 2 directivos, cualquier importe, 5 | 1.702 | −0,14 % | −0,60 | −3,4 % | 3 de 8 |
+    | H1 2 directivos, cualquier importe, 21 | 1.250 | −0,63 % | −1,53 | −4,3 % | 2 de 8 |
+    | H1 2 directivos, cualquier importe, 63 | 1.028 | −0,42 % | −0,86 | −1,9 % | 4 de 8 |
+    | H1 2 directivos, ≥ 100.000, 5 | 1.174 | −0,14 % | +0,10 | +0,6 % | 5 de 8 |
+    | H1 2 directivos, ≥ 100.000, 21 | 887 | −0,50 % | −0,65 | −2,9 % | 2 de 8 |
+    | H1 2 directivos, ≥ 100.000, 63 | 796 | −0,21 % | −0,63 | −1,7 % | 3 de 8 |
+    | H2 10 % extremo, 5 sesiones | 5.135 | −0,25 % | −1,37 | −5,9 % | 4 de 8 |
+    | H2 10 %, 21 | 5.114 | −0,03 % | −0,21 | −0,4 % | 4 de 8 |
+    | H2 10 %, 63 | 4.195 | +0,00 % | −0,02 | −0,0 % | 2 de 8 |
+    | H2 20 %, 5 | 10.234 | −0,14 % | −1,69 | −5,3 % | 4 de 8 |
+    | H2 20 %, 21 | 10.150 | −0,02 % | −0,58 | −0,8 % | 3 de 8 |
+    | H2 20 %, 63 | 7.778 | +0,04 % | +0,01 | +0,0 % | 3 de 8 |
+    | H3 3 sesiones antes | 25.175 | −0,05 % | −0,71 | −3,1 % | 3 de 8 |
+    | H3 5 sesiones antes | 25.158 | −0,05 % | +0,43 | +1,5 % | 4 de 8 |
+    | H3 10 sesiones antes | 25.140 | −0,01 % | +1,03 | +1,8 % | 3 de 8 |
+
+  - **H4: suspende el examen.**
+    - Periodo: del 05-01-2024 al 20-11-2026, con 1.225 operaciones en 536 días.
+    - Media −0,002 R, acierto 49 %, t = −0,06. Total −330: la primera mitad +1.908 y la segunda −2.238.
+    - Perdió la cuenta de fondeo 3 veces. Semana media −2; semanas con 500 o más: 18 de 146.
+  - **Lo que enseña.** Con datos oficiales pasa lo mismo que con los precios solos: antes de costes, en torno a
+    cero; después, nada. Encaja con lo publicado:
+    - las compras de directivos explican algo sobre todo en empresas muy pequeñas, fuera del S&P 1500;
+    - la deriva tras resultados desapareció en las grandes desde mediados de los 2000 (Martineau, 2021).
+  - **Siguiente ronda, solo si el usuario la pide.** Se escribe aquí antes de mirar, con t ≥ 2,8 porque ya van 4
+    hipótesis. El periodo reservado (2023–hoy) sigue sin mirar.
 
 ## Pendientes, por orden
 
@@ -469,3 +513,7 @@ del usuario.
     acción y elija los 5 mejores". El sexto bot, `agents/scenario_agent.py`, y su tabla en la Sala de control.
 15. **19-11, examen del bot de escenarios.** "prepara el paso 3". `scenario_exam.py`: dos años de cripto fuera de
     muestra. Suspende: −0,17 R por operación en 916 operaciones, 0 de 9 trimestres en positivo.
+16. **23-11, datos públicos oficiales.** "activa todo, haz pruebas hasta obtener exito, agrega las funciones que sean
+    necesarias, usa datos que estan de acceso publico de los gobiernos y las empresas en sus propias paginas".
+    `utils/public_data.py` (SEC, State Street, Reserva Federal, BLS, Yahoo), calendario oficial en el bot Macro y
+    `event_lab.py` con H1-H4. Las cuatro suspenden. Motor de la cuenta de fondeo encendido desde la app.
