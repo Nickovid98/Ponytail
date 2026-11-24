@@ -1,6 +1,6 @@
 # Estado del proyecto
 
-Actualizado el 23-11-2026. Quien cierre una tarea actualiza este archivo en el mismo commit.
+Actualizado el 24-11-2026. Quien cierre una tarea actualiza este archivo en el mismo commit.
 
 ## En una pantalla
 
@@ -15,8 +15,8 @@ Actualizado el 23-11-2026. Quien cierre una tarea actualiza este archivo en el m
 - **Qué dice la investigación.** Con precios reales y después de costes, nada de lo probado gana dinero en datos
   que no había visto. No hay ventaja demostrada. Los objetivos del usuario no se han alcanzado en ninguna
   simulación. Tampoco con datos oficiales de la SEC (resultados, compras de directivos y tamaño de cada empresa en
-  cada fecha): el 23-11 suspendieron las cuatro ideas publicadas que se examinaron, y el bot de escenarios suspendió
-  el 19-11.
+  cada fecha): el 23 y el 24-11 se examinaron 7 ideas publicadas en dos rondas y ninguna pasó, y el bot de
+  escenarios suspendió el 19-11.
 - **Activado el 23-11 (simulación).** El bot Macro veta entradas 30 minutos antes y después de cada anuncio de la
   Reserva Federal y de cada IPC y dato de empleo de la BLS. Se encendió el motor de la cuenta de fondeo.
 - **Recomendación dada al usuario.** No poner dinero ni pagar una evaluación de fondeo con este bot. Elegir entre
@@ -311,6 +311,30 @@ apuestan a la baja frente a su grupo, porque la literatura las respalda sobre to
       actualización, no un trimestre.
   - **Lo que queda.** Con el cambio, las señales dudosas bajan al 4–21 % de los días con posición, según la
     variante. La hipótesis, las variantes, los periodos, los costes y el umbral no cambian.
+- **Resultado (24-11): las tres descartadas en el entrenamiento, sin examen.** Código en el commit b3b25cf, guardado
+  antes de ver ningún resultado. Todas las variantes, en 2010–2017, netas de costes y del préstamo:
+
+  | Variante | Ops | Media por op | t | Al año | Años + |
+  |---|---|---|---|---|---|
+  | H5 retraso de 2 sesiones, máximo 10 | 5.018 | −0,16 % | −0,85 | −8,3 % | 4 de 8 |
+  | H5 retraso de 2, máximo 30 | 5.018 | −0,16 % | −0,66 | −6,1 % | 3 de 8 |
+  | H5 retraso de 5, máximo 10 | 1.144 | −0,53 % | −1,37 | −14,9 % | 3 de 8 |
+  | H5 retraso de 5, máximo 30 | 1.144 | −0,52 % | −0,97 | −9,6 % | 3 de 8 |
+  | H6 5 sesiones | 109 | −0,05 % | +0,69 | +2,6 % | 5 de 8 |
+  | H6 21 sesiones | 100 | −0,40 % | +0,76 | +4,3 % | 4 de 8 |
+  | H6 63 sesiones | 94 | −3,01 % | −0,80 | −6,3 % | 3 de 8 |
+  | H7 2 directivos, 21 sesiones | 13.823 | −0,42 % | −3,20 | −4,0 % | 2 de 8 |
+  | H7 2 directivos, 63 sesiones | 8.641 | −0,82 % | −2,14 | −2,1 % | 2 de 8 |
+  | H7 3 directivos, 21 sesiones | 10.556 | −0,44 % | −2,18 | −3,4 % | 3 de 8 |
+  | H7 3 directivos, 63 sesiones | 7.026 | −0,92 % | −3,08 | −2,8 % | 2 de 8 |
+
+  - **H7 no sirve al revés.** Su pérdida es casi toda el coste: unos 0,4 puntos por operación entre comisiones,
+    deslizamiento y préstamo. Comprar tras esas ventas tampoco ganaría, y probarlo ahora sería ajustarse a lo
+    que se acaba de ver.
+  - **H6 con muy pocos casos.** En las empresas del tamaño del S&P 1500 hay unos 100 avisos en 8 años: no
+    demuestran nada, ni a favor ni en contra.
+  - **Balance de las dos rondas.** 7 ideas publicadas, 33 variantes y ninguna con ventaja después de costes. El
+    periodo reservado (de 2023 a hoy) sigue sin mirar.
 
 ## Pendientes, por orden
 
@@ -570,3 +594,6 @@ del usuario.
     necesarias, usa datos que estan de acceso publico de los gobiernos y las empresas en sus propias paginas".
     `utils/public_data.py` (SEC, State Street, Reserva Federal, BLS, Yahoo), calendario oficial en el bot Macro y
     `event_lab.py` con H1-H4. Las cuatro suspenden. Motor de la cuenta de fondeo encendido desde la app.
+17. **24-11, segunda ronda.** "Sí, otra ronda". H5 (resultados que se retrasan), H6 (avisos de mala noticia en la
+    SEC) y H7 (ventas en racimo de directivos), registradas antes y revisadas por críticos independientes (una
+    enmienda a H5). Las tres, descartadas en el entrenamiento.

@@ -543,7 +543,7 @@ def train(rnd: int) -> None:
     choice, table = {}, {}
     for name, (grid, fn) in ROUNDS[rnd].items():
         data = inputs(p, name)
-        say(f"\n{name}: {len(data)} eventos de partida")
+        say(f"\n{name}: {len(data[0]) if isinstance(data, tuple) else len(data)} eventos de partida")
         rows = []
         for v in grid:
             s = stats(p, period(fn(p, data, v), *TRAIN), *TRAIN)
