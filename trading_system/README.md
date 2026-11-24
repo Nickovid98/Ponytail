@@ -450,7 +450,7 @@ Fuentes gratuitas y sin clave, con copia en `data/public/` (fuera de git):
 - **Reserva Federal y BLS.** El calendario de anuncios.
 - **Yahoo.** Precios diarios desde 2008 y velas de 1 hora de casi tres años.
 
-`event_lab.py` examina cuatro ideas publicadas que usan esos datos. Las reglas, los periodos y el criterio de
+`event_lab.py` examina ideas publicadas que usan esos datos, por rondas (cuatro en la primera, tres en la segunda). Las reglas, los periodos y el criterio de
 aprobado están en `ESTADO.md`, escritos antes de mirar ningún resultado:
 
 ```bash
@@ -458,6 +458,7 @@ venv/bin/python event_lab.py download   # la primera vez, una hora o más
 venv/bin/python event_lab.py train      # elige una variante de cada idea, solo con 2010-2017
 venv/bin/python event_lab.py exam       # la examina en 2018-2022
 venv/bin/python event_lab.py holdout    # una sola vez: de 2023 a hoy, solo lo que aprobó
+venv/bin/python event_lab.py train --round 2   # la segunda ronda (H5-H7), con su propio umbral
 ```
 
 ## La app (`dashboard.py`)

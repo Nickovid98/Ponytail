@@ -297,6 +297,20 @@ apuestan a la baja frente a su grupo, porque la literatura las respalda sobre to
     usa 2,8.
 - **Si alguna aprueba.** Son operaciones de días o semanas, a la baja. No caben en la cuenta de fondeo actual,
   que cierra todo cada día, así que irían como cartera aparte en simulación, y se decide con el usuario.
+- **Enmienda del 24-11 a H5, antes de ver ningún resultado.**
+  - **El fallo.** La revisión independiente encontró que H5 solo reconocía el comunicado por la etiqueta 2.02
+    del 8-K. Algunas empresas lo publican solo con la 9.01 (GE 2017, PSA 2017, LNC 2018) y otras meten avances o
+    actualizaciones con la 2.02. En la simulación con fechas, sin precios:
+    - del 5 al 16 % de las señales eran falsos retrasos (la empresa sí había publicado);
+    - esas señales ocupaban hasta el 46 % de los días con posición.
+  - **El cambio.**
+    - El trimestre cuenta como publicado con el primero de dos avisos: un 8-K 2.02 desde 45 días antes de la fecha
+      esperada, o su 10-Q o 10-K desde 15 días antes. El del trimestre anterior sale antes.
+    - Se cierra al día siguiente de ese primer aviso.
+    - Un 2.02 con otro a menos de 50 días no sirve de referencia para el año siguiente: es un avance o una
+      actualización, no un trimestre.
+  - **Lo que queda.** Con el cambio, las señales dudosas bajan al 4–21 % de los días con posición, según la
+    variante. La hipótesis, las variantes, los periodos, los costes y el umbral no cambian.
 
 ## Pendientes, por orden
 

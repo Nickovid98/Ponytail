@@ -68,7 +68,7 @@ app orb backtest alpaca topstepx funded scenarios public`. Solo `backtest` es le
 | `backtest.py` | simulación vela a vela, cuenta fondeada por generaciones, examen fuera de muestra | `run`, `successor`, `fold`, `walk_forward`, `yahoo`, `export` |
 | `scenario_exam.py` | examen fuera de muestra del bot de escenarios (cripto 2 años por CCXT, acciones 60 días por Yahoo) | `crypto_bets`, `stock_bets`, `chosen`, `report` |
 | `utils/public_data.py` | datos públicos sin clave: SEC (resultados, formularios 4, tamaño), State Street, Reserva Federal, BLS, Yahoo | `universe`, `filings`, `earnings`, `insider`, `floats`, `daily`, `hourly`, `calendar` |
-| `event_lab.py` | laboratorio de H1-H4 con datos públicos (protocolo en `ESTADO.md`): `download`, `train`, `exam`, `holdout` | `Panel`, `clean`, `pit_groups`, `h1`-`h4`, `stats`, `h4_stats` |
+| `event_lab.py` | laboratorio de H1-H7 con datos públicos (protocolo en `ESTADO.md`): `download`, `train`, `exam`, `holdout` (`--round 2` para H5-H7) | `Panel`, `clean`, `pit_groups`, `h1`-`h7`, `stats`, `h4_stats`, `passes` |
 | `dashboard.py` | la app (Streamlit): una función por pestaña | `control_room`, `bots_room`, `boss_room`, `lab`, `settings` |
 | `selfcheck.py` | la batería: una función `check_*` por área | |
 

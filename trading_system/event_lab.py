@@ -6,6 +6,7 @@ de mirar ningún resultado; este archivo los aplica tal cual.
     python event_lab.py train       # H1-H3: todas las variantes en 2010-2017 y elige una de cada (o la descarta)
     python event_lab.py exam        # examen 2018-2022 de las elegidas, y H4 en sus velas de 1 hora
     python event_lab.py holdout     # una sola vez: del 01-01-2023 a hoy, solo las que aprobaron el examen
+    python event_lab.py train --round 2   # lo mismo con la segunda ronda (H5-H7), con su propio umbral
 
 Medida: una acción solo se opera si al entrar era del tamaño del S&P 500, 400 o 600 (según la SEC en ese momento), y
 se mide contra la media de las acciones de ese mismo grupo en los mismos días, neta de costes. La cartera mensual
@@ -39,9 +40,15 @@ ADJ_GAP = 0.10  # el ajustado y el cierre solo se separan por un dividendo; más
 BAD_DAY = 0.75  # un movimiento de más del 75 % que se deshace en 3 sesiones es un error: fuera la ida y la vuelta
 REVERT = math.log(1.15)
 
+BORROW = 0.03  # segunda ronda: préstamo de las acciones vendidas en corto, 3 % al año por sesión abierta
+
 H1_GRID = [{"insiders": n, "usd": v, "hold": h} for n in (1, 2) for v in (0, 100_000) for h in (5, 21, 63)]
 H2_GRID = [{"tail": t, "hold": h} for t in (0.10, 0.20) for h in (5, 21, 63)]
 H3_GRID = [{"before": k} for k in (3, 5, 10)]
+H5_GRID = [{"late": k, "max": m} for k in (2, 5) for m in (10, 30)]
+H6_GRID = [{"hold": h} for h in (5, 21, 63)]
+H7_GRID = [{"insiders": n, "usd": 1_000_000, "hold": h} for n in (2, 3) for h in (21, 63)]
+EXAM_T = {1: 2.5, 2: 2.8}  # 4 hipótesis en la primera ronda; 7 con la segunda (ESTADO.md)
 H4_RULES = {"gap": 0.03, "rr": 2.0, "risk_usd": 200, "max_per_day": 3, "capital": 50_000, "max_loss": 2_000,
             "daily_limit": 1_000, "kill_pct": 75, "max_notional": 100_000}
 
@@ -187,29 +194,55 @@ def earnings_events(p: Panel) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["ticker", "accepted", "d0"])
 
 
-def insider_buys(p: Panel) -> pd.DataFrame:
+def insider_trades(p: Panel, code: str) -> pd.DataFrame:
+    """Compras (P) o ventas (S) en bolsa de consejeros y directivos de las empresas del panel, por fecha de
+    presentación."""
     files = sorted((pdx.DIR / "insider").glob("*.parquet"))
     df = pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
-    df = df[(df.code == "P") & df.insider & df.issuer.isin(p.cik.keys())]
+    df = df[(df.code == code) & df.insider & df.issuer.isin(p.cik.keys())]
     return df.assign(ticker=df.issuer.map(p.cik)).sort_values("filed").reset_index(drop=True)
+
+
+def insider_buys(p: Panel) -> pd.DataFrame:
+    return insider_trades(p, "P")
+
+
+def bad_news(p: Panel) -> pd.DataFrame:
+    """Avisos de mala noticia en la SEC: NT 10-K y NT 10-Q (las cuentas no llegarán a tiempo) y 8-K con el punto
+    4.02 (las cuentas anteriores ya no son fiables), con la primera sesión en que el precio puede reaccionar."""
+    rows = []
+    for cik, t in p.cik.items():
+        path = pdx.DIR / "sec" / f"{cik}.parquet"
+        if not path.exists():
+            continue
+        f = pd.read_parquet(path)
+        hit = f.form.isin(["NT 10-K", "NT 10-Q"]) | ((f.form == "8-K") & f["items"].fillna("").str.contains(r"(?:^|,)\s*4\.02"))
+        for acc in f[hit].accepted.dropna():
+            i = p.day0(acc)
+            if i:
+                rows.append({"ticker": t, "accepted": acc, "d0": i})
+    return pd.DataFrame(rows, columns=["ticker", "accepted", "d0"])
 
 
 # --- Operaciones y estadísticas ------------------------------------------------------------------------------------
 
-def trades_from(p: Panel, signals: list[tuple[str, int, int, int]]) -> pd.DataFrame:
+def trades_from(p: Panel, signals: list[tuple[str, int, int, int]], borrow: float = 0.0) -> pd.DataFrame:
     """signals: (ticker, entrada, salida, lado) con índices de sesión. Solo si al entrar la acción tenía grupo (su
     tamaño de entonces), con precio en la entrada y la salida, y una posición por acción a la vez. El grupo de la
-    entrada es el de toda la operación: salir del grupo después no la anula."""
+    entrada es el de toda la operación: salir del grupo después no la anula. `borrow`: coste anual del préstamo en
+    las ventas en corto, cobrado por sesión abierta."""
     out, busy = [], {}
     for t, e, x, side in sorted(signals, key=lambda s: (s[1], s[0])):
         c = p.col[t]
-        if e <= busy.get(t, -1) or e < 1 or x >= len(p.dates) or not (p.has[e, c] and p.has[x, c]) or not p.grp[e, c]:
+        if e <= busy.get(t, -1) or e < 1 or x <= e or x >= len(p.dates) or not (p.has[e, c] and p.has[x, c]) \
+                or not p.grp[e, c]:
             continue
         busy[t] = x
         g = int(p.grp[e, c])
+        fee_day = borrow / 252 if side < 0 else 0.0
         out.append({"ticker": t, "e": e, "x": x, "side": side, "entry": p.dates[e], "exit": p.dates[x], "g": g,
-                    "ret": side * p.abnormal(c, g, e, x) - COST_BY_CODE[g]})
-    return pd.DataFrame(out, columns=["ticker", "e", "x", "side", "entry", "exit", "g", "ret"])
+                    "fee_day": fee_day, "ret": side * p.abnormal(c, g, e, x) - COST_BY_CODE[g] - fee_day * (x - e)})
+    return pd.DataFrame(out, columns=["ticker", "e", "x", "side", "entry", "exit", "g", "fee_day", "ret"])
 
 
 def period(df: pd.DataFrame, start, end) -> pd.DataFrame:
@@ -221,9 +254,9 @@ def stats(p: Panel, df: pd.DataFrame, start, end) -> dict:
     el primer día); cada mes, la suma. El t-estadístico es el de la media mensual."""
     lo, hi = p.at_or_after(start), min(p.after(end), len(p.dates)) - 1
     tot, n = np.zeros(len(p.dates)), np.zeros(len(p.dates))
-    for t, e, x, side, g in zip(df.ticker, df.e, df.x, df.side, df.g):
+    for t, e, x, side, g, fee in zip(df.ticker, df.e, df.x, df.side, df.g, df.fee_day):
         c = p.col[t]
-        tot[e + 1:x + 1] += side * (p.r[e + 1:x + 1, c] - p.bench[e + 1:x + 1, g])
+        tot[e + 1:x + 1] += side * (p.r[e + 1:x + 1, c] - p.bench[e + 1:x + 1, g]) - fee
         n[e + 1:x + 1] += 1
         tot[e + 1] -= COST_BY_CODE[g]
     daily = pd.Series(np.where(n > 0, tot / np.maximum(n, 1), 0.0)[lo:hi + 1], index=p.dates[lo:hi + 1])
@@ -242,17 +275,23 @@ def stats(p: Panel, df: pd.DataFrame, start, end) -> dict:
 
 # --- Hipótesis -------------------------------------------------------------------------------------------------
 
-def h1(p: Panel, buys: pd.DataFrame, v: dict) -> pd.DataFrame:
+def cluster(p: Panel, rows: pd.DataFrame, v: dict, side: int) -> list[tuple[str, int, int, int]]:
+    """Señales de directivos: en cada fecha de presentación d, al menos v["insiders"] personas distintas y v["usd"]
+    en total en los 30 días hasta d. Público el día d (quizá tras el cierre): entra al cierre de la sesión siguiente."""
     sig = []
-    for t, g in buys.groupby("ticker"):
+    for t, g in rows.groupby("ticker"):
         filed, owner, value = g.filed.to_numpy(), g.owner.to_numpy(), g.value.fillna(0).to_numpy()
         for d in np.unique(filed):
             lo = np.searchsorted(filed, d - np.timedelta64(30, "D"), side="right")
             hi = np.searchsorted(filed, d, side="right")
             if len(set(owner[lo:hi])) >= v["insiders"] and value[lo:hi].sum() >= v["usd"]:
-                e = p.after(pd.Timestamp(d))  # público el día d (quizá tras el cierre): entra al cierre de la siguiente
-                sig.append((t, e, e + v["hold"], 1))
-    return trades_from(p, sig)
+                e = p.after(pd.Timestamp(d))
+                sig.append((t, e, e + v["hold"], side))
+    return sig
+
+
+def h1(p: Panel, buys: pd.DataFrame, v: dict) -> pd.DataFrame:
+    return trades_from(p, cluster(p, buys, v, 1))
 
 
 def h2(p: Panel, ev: pd.DataFrame, v: dict) -> pd.DataFrame:
@@ -288,11 +327,76 @@ def h3(p: Panel, ev: pd.DataFrame, v: dict) -> pd.DataFrame:
     return trades_from(p, sig)
 
 
-GRIDS = {"H1": (H1_GRID, h1), "H2": (H2_GRID, h2), "H3": (H3_GRID, h3)}
+def reports(p: Panel) -> pd.DataFrame:
+    """Informes trimestrales y anuales (10-Q y 10-K, sin enmiendas), con la primera sesión en que el precio puede
+    reaccionar."""
+    rows = []
+    for cik, t in p.cik.items():
+        path = pdx.DIR / "sec" / f"{cik}.parquet"
+        if not path.exists():
+            continue
+        f = pd.read_parquet(path)
+        for acc in f[f.form.isin(["10-Q", "10-K"])].accepted.dropna():
+            i = p.day0(acc)
+            if i:
+                rows.append({"ticker": t, "accepted": acc, "d0": i})
+    return pd.DataFrame(rows, columns=["ticker", "accepted", "d0"])
+
+
+def h5(p: Panel, data: tuple[pd.DataFrame, pd.DataFrame], v: dict) -> pd.DataFrame:
+    """Resultados que se retrasan (con la enmienda del 24-11): v["late"] sesiones después de la fecha esperada (la del
+    mismo trimestre del año anterior + 364 días) sin aviso de ese trimestre, corto al cierre. Aviso = un 8-K 2.02
+    desde 45 días antes de la fecha esperada o su 10-Q/10-K desde 15 días antes, lo primero que llegue; se cierra al
+    cierre del día siguiente, o a las v["max"] sesiones. Un 2.02 con otro a menos de 50 días (un avance, una
+    actualización) no sirve de referencia."""
+    ev, rep = data
+    filed = {t: np.sort(g.d0.to_numpy()) for t, g in rep.groupby("ticker")}
+    sig = []
+    for t, g in ev.groupby("ticker"):
+        d0s = np.sort(g.d0.to_numpy())
+        q = filed.get(t, np.array([], int))
+        for i, d in enumerate(d0s):
+            gap_prev = (p.dates[d] - p.dates[d0s[i - 1]]).days if i else 999
+            gap_next = (p.dates[d0s[i + 1]] - p.dates[d]).days if i + 1 < len(d0s) else 999
+            if min(gap_prev, gap_next) < 50:
+                continue
+            due = p.at_or_after(p.dates[d] + pd.Timedelta(days=364))
+            s = due + v["late"]
+            if s + 1 >= len(p.dates):
+                continue
+            j = np.searchsorted(d0s, p.at_or_after(p.dates[due] - pd.Timedelta(days=45)), side="left")
+            jq = np.searchsorted(q, p.at_or_after(p.dates[due] - pd.Timedelta(days=15)), side="left")
+            ends = [int(a[k]) for a, k in ((d0s, j), (q, jq)) if k < len(a)]
+            first = min(ends) if ends else None  # primer aviso de ese trimestre, llegue cuando llegue
+            if first is not None and first <= s:
+                continue  # ya llegó (o se adelantó): no hay retraso que vender
+            sig.append((t, s, min(first + 1, s + v["max"]) if first is not None else s + v["max"], -1))
+    return trades_from(p, sig, BORROW)
+
+
+def h6(p: Panel, ev: pd.DataFrame, v: dict) -> pd.DataFrame:
+    """Avisos de mala noticia: corto al cierre de la primera sesión en que el precio puede reaccionar."""
+    return trades_from(p, [(t, d0, d0 + v["hold"], -1) for t, d0 in zip(ev.ticker, ev.d0)], BORROW)
+
+
+def h7(p: Panel, sales: pd.DataFrame, v: dict) -> pd.DataFrame:
+    """Ventas en racimo de directivos: corto al cierre de la sesión siguiente a la presentación."""
+    return trades_from(p, cluster(p, sales, v, -1), BORROW)
+
+
+ROUNDS = {1: {"H1": (H1_GRID, h1), "H2": (H2_GRID, h2), "H3": (H3_GRID, h3)},
+          2: {"H5": (H5_GRID, h5), "H6": (H6_GRID, h6), "H7": (H7_GRID, h7)}}
+GRIDS = {name: g for r in ROUNDS.values() for name, g in r.items()}
 
 
 def inputs(p: Panel, name: str):
-    return insider_buys(p) if name == "H1" else earnings_events(p)
+    if name == "H1":
+        return insider_buys(p)
+    if name == "H7":
+        return insider_trades(p, "S")
+    if name == "H5":
+        return earnings_events(p), reports(p)
+    return bad_news(p) if name == "H6" else earnings_events(p)
 
 
 def h4(p: Panel, ev: pd.DataFrame) -> pd.DataFrame:
@@ -416,13 +520,28 @@ def load(name: str):
     return json.loads(path.read_text())
 
 
-def train() -> None:
+def passes(s: dict, rnd: int) -> bool:
+    """Aprueba el examen: al menos 100 operaciones, el t de su ronda y al menos 3 de los 5 años en positivo."""
+    return s["n"] >= 100 and s["t"] >= EXAM_T[rnd] and s["years_pos"] >= 3
+
+
+def confirms(s: dict) -> bool:
+    """Confirma en el periodo reservado: al menos 100 operaciones, media positiva y t >= 1,65."""
+    return s["n"] >= 100 and s["t"] >= 1.65 and s["mean_trade"] > 0
+
+
+def tag(rnd: int, step: str) -> str:
+    """Archivo de cada paso: train.json, exam.json y holdout.json para la primera ronda; train2.json... para la segunda."""
+    return f"{step}{'' if rnd == 1 else rnd}.json"
+
+
+def train(rnd: int) -> None:
     p = Panel()
-    say(f"Panel: {len(p.tickers)} acciones, {p.dates[0].date()} a {p.dates[-1].date()}; con grupo al empezar el "
-        f"entrenamiento: {int((p.grp[p.at_or_after(TRAIN[0])] > 0).sum())}, al empezar el examen: "
+    say(f"Ronda {rnd}. Panel: {len(p.tickers)} acciones, {p.dates[0].date()} a {p.dates[-1].date()}; con grupo al "
+        f"empezar el entrenamiento: {int((p.grp[p.at_or_after(TRAIN[0])] > 0).sum())}, al empezar el examen: "
         f"{int((p.grp[p.at_or_after(EXAM[0])] > 0).sum())}")
     choice, table = {}, {}
-    for name, (grid, fn) in GRIDS.items():
+    for name, (grid, fn) in ROUNDS[rnd].items():
         data = inputs(p, name)
         say(f"\n{name}: {len(data)} eventos de partida")
         rows = []
@@ -439,59 +558,61 @@ def train() -> None:
         else:
             choice[name] = best["variant"]
             say(f"  -> elegida {json.dumps(best['variant'])} con t = {best['t']:+.2f}")
-    save("train.json", {"when": dt.datetime.now().isoformat(), "choice": choice, "table": table})
+    save(tag(rnd, "train"), {"when": dt.datetime.now().isoformat(), "choice": choice, "table": table})
 
 
-def exam() -> None:
-    choice = load("train.json")["choice"]
+def exam(rnd: int) -> None:
+    choice = load(tag(rnd, "train"))["choice"]
     p = Panel()
     res = {}
-    for name, (grid, fn) in GRIDS.items():
+    for name, (grid, fn) in ROUNDS[rnd].items():
         v = choice.get(name)
         if v is None:
             res[name] = {"pass": False, "why": "descartada en el entrenamiento"}
             say(f"{name}: descartada en el entrenamiento, sin examen")
             continue
         s = stats(p, period(fn(p, inputs(p, name), v), *EXAM), *EXAM)
-        ok = s["n"] >= 100 and s["t"] >= 2.5 and s["years_pos"] >= 3
+        ok = passes(s, rnd)
         res[name] = {"variant": v, **s, "pass": ok}
-        say(f"{name} {json.dumps(v)}: {fmt(s)} -> {'APRUEBA' if ok else 'SUSPENDE'}")
+        say(f"{name} {json.dumps(v)}: {fmt(s)} -> {'APRUEBA' if ok else 'SUSPENDE'} (hace falta t >= {EXAM_T[rnd]})")
         say(f"     por año: {s['years']}")
-    trades = h4(p, earnings_events(p))
-    s = h4_stats(trades)
-    ok = s.get("n", 0) >= 100 and s.get("t", 0) >= 2.5 and min(s.get("halves", [0])) > 0 and s.get("accounts_lost", 1) == 0
-    res["H4"] = {**H4_RULES, **s, "pass": ok}
-    if s.get("n"):
-        say(f"H4 ({s['from']} a {s['to']}): {s['n']} ops en {s['days']} días · media {s['mean_R']:+.3f} R · acierto "
-            f"{s['win']:.0%} · t = {s['t']:+.2f} · total {s['total']:+,.0f} · mitades {s['halves'][0]:+,.0f} y "
-            f"{s['halves'][1]:+,.0f} · cuentas perdidas {s['accounts_lost']} · media semanal {s['weekly_mean']:+,.0f} "
-            f"· semanas >= 500: {s['weeks_500']} de {s['weeks']} -> {'APRUEBA' if ok else 'SUSPENDE'}")
-        trades.drop(columns="path").to_csv(OUT / "h4_trades.csv", index=False)
-    save("exam.json", {"when": dt.datetime.now().isoformat(), "result": res})
+    if rnd == 1:  # H4 no tiene variantes: todo su periodo es examen
+        trades = h4(p, earnings_events(p))
+        s = h4_stats(trades)
+        ok = s.get("n", 0) >= 100 and s.get("t", 0) >= 2.5 and min(s.get("halves", [0])) > 0 and s.get("accounts_lost", 1) == 0
+        res["H4"] = {**H4_RULES, **s, "pass": ok}
+        if s.get("n"):
+            say(f"H4 ({s['from']} a {s['to']}): {s['n']} ops en {s['days']} días · media {s['mean_R']:+.3f} R · acierto "
+                f"{s['win']:.0%} · t = {s['t']:+.2f} · total {s['total']:+,.0f} · mitades {s['halves'][0]:+,.0f} y "
+                f"{s['halves'][1]:+,.0f} · cuentas perdidas {s['accounts_lost']} · media semanal {s['weekly_mean']:+,.0f} "
+                f"· semanas >= 500: {s['weeks_500']} de {s['weeks']} -> {'APRUEBA' if ok else 'SUSPENDE'}")
+            trades.drop(columns="path").to_csv(OUT / "h4_trades.csv", index=False)
+    save(tag(rnd, "exam"), {"when": dt.datetime.now().isoformat(), "result": res})
 
 
-def holdout() -> None:
-    if (OUT / "holdout.json").exists():
-        raise SystemExit("El periodo reservado ya se miró una vez: no se repite (ver ESTADO.md).")
-    res = load("exam.json")["result"]
+def holdout(rnd: int) -> None:
+    if (OUT / tag(rnd, "holdout")).exists():
+        raise SystemExit("El periodo reservado ya se miró una vez para esta ronda: no se repite (ver ESTADO.md).")
+    res = load(tag(rnd, "exam"))["result"]
     p = Panel()
     out = {}
-    for name, (grid, fn) in GRIDS.items():
+    for name, (grid, fn) in ROUNDS[rnd].items():
         if not res.get(name, {}).get("pass"):
             continue
         end = str(p.dates[-1].date())
         s = stats(p, period(fn(p, inputs(p, name), res[name]["variant"]), HOLD_START, end), HOLD_START, end)
-        ok = s["n"] >= 100 and s["t"] >= 1.65 and s["mean_trade"] > 0
+        ok = confirms(s)
         out[name] = {"variant": res[name]["variant"], **s, "pass": ok}
         say(f"{name} reservado {HOLD_START} a {end}: {fmt(s)} -> {'CONFIRMA' if ok else 'NO CONFIRMA'}")
     if not out:
         say("Ninguna hipótesis diaria aprobó el examen: no hay nada que mirar en el periodo reservado.")
-    save("holdout.json", {"when": dt.datetime.now().isoformat(), "result": out})
+    save(tag(rnd, "holdout"), {"when": dt.datetime.now().isoformat(), "result": out})
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("step", choices=["download", "train", "exam", "holdout"])
-    step = ap.parse_args().step
+    ap.add_argument("--round", type=int, default=1, choices=sorted(ROUNDS), help="ronda de hipótesis (ESTADO.md)")
+    a = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")
-    {"download": download, "train": train, "exam": exam, "holdout": holdout}[step]()
+    download() if a.step == "download" else {"train": train, "exam": exam, "holdout": holdout}[a.step](a.round)

@@ -2017,6 +2017,65 @@ def check_public():
     st = lab.h4_stats(dip)
     assert st["accounts_lost"] == 1, st  # 48.600 - 650 toca el suelo de 48.000 aunque el día acabe en +400
 
+    # 9) Segunda ronda (ESTADO.md). Los cortos pagan el préstamo, 3 % al año por sesión abierta, en la operación y en
+    # la cartera; los largos no.
+    short = lab.trades_from(p, [("AAA", 400, 410, -1)], lab.BORROW)
+    assert abs(short.ret[0] - (-excess(0, 1, 400, 410) - lab.COST["500"] - 0.03 / 252 * 10)) < 1e-12, short
+    assert abs(sum(lab.stats(p, short, p.dates[395], p.dates[420])["years"].values()) - short.ret[0]) < 2e-4
+    long_ = lab.trades_from(p, [("AAA", 400, 410, 1)], lab.BORROW)
+    assert abs(long_.ret[0] - (excess(0, 1, 400, 410) - lab.COST["500"])) < 1e-12
+    assert lab.tag(1, "train") == "train.json" and lab.tag(2, "exam") == "exam2.json" and lab.EXAM_T == {1: 2.5, 2: 2.8}
+    ok = {"n": 150, "t": 2.6, "years_pos": 3, "mean_trade": 0.001}
+    assert lab.passes(ok, 1) and not lab.passes(ok, 2) and lab.passes(ok | {"t": 2.85}, 2)  # 2,8 en la segunda ronda
+    assert not lab.passes(ok | {"n": 99}, 1) and not lab.passes(ok | {"years_pos": 2}, 1)
+    assert lab.confirms(ok | {"t": 1.7}) and not lab.confirms(ok | {"t": 1.6}) and not lab.confirms(ok | {"mean_trade": -0.001})
+
+    # H5: k sesiones después de la fecha esperada sin comunicado de ese trimestre -> corto hasta el día siguiente a la
+    # reacción (o M sesiones). Si salió a tiempo, o se adelantó menos de 45 días, no hay operación.
+    due = p.at_or_after(p.dates[100] + pd.Timedelta(days=364))
+    early = p.at_or_after(p.dates[due] - pd.Timedelta(days=10))
+    def h5(nxt, v, filings=(), base=(100,)):
+        ev = pd.DataFrame({"ticker": "BBB", "d0": list(base) + list(nxt)})
+        rep = pd.DataFrame({"ticker": "BBB", "d0": list(filings)}, columns=["ticker", "d0"])
+        out = lab.h5(p, (ev, rep), v)
+        return [(t, e, x, s) for t, e, x, s in zip(out.ticker, out.e, out.x, out.side) if e < 500]
+
+    assert h5([due + 7], {"late": 2, "max": 30}) == [("BBB", due + 2, due + 8, -1)]
+    assert h5([due + 7], {"late": 2, "max": 3}) == [("BBB", due + 2, due + 5, -1)]
+    assert h5([due + 7], {"late": 5, "max": 30}) == [("BBB", due + 5, due + 8, -1)]
+    assert h5([due + 2], {"late": 2, "max": 30}) == []  # sale justo el día k: ya se sabe al cierre
+    assert h5([due], {"late": 2, "max": 30}) == [] and h5([early], {"late": 2, "max": 30}) == []
+    assert h5([], {"late": 2, "max": 30}) == [("BBB", due + 2, due + 32, -1)]  # no llega: M sesiones
+    # Enmienda del 24-11: el comunicado sin la etiqueta 2.02 se ve por su 10-Q/10-K (desde 15 días antes de la fecha
+    # esperada; el del trimestre anterior no cuenta), y un 2.02 con otro a menos de 50 días no sirve de referencia.
+    assert h5([], {"late": 2, "max": 30}, filings=[due + 1]) == []
+    assert h5([], {"late": 2, "max": 30}, filings=[due + 4]) == [("BBB", due + 2, due + 5, -1)]
+    prev_q = p.at_or_after(p.dates[due] - pd.Timedelta(days=30))
+    assert h5([], {"late": 2, "max": 30}, filings=[prev_q]) == [("BBB", due + 2, due + 32, -1)]
+    assert h5([], {"late": 2, "max": 30}, base=(100, 115)) == []  # dos 2.02 a 21 días: ninguno es un trimestre
+    assert h5([], {"late": 2, "max": 30}, base=(55, 100))[-1:] == [("BBB", due + 2, due + 32, -1)]  # a 63 días: sí
+
+    # H6: NT 10-K, NT 10-Q y 8-K con el punto 4.02 (no las enmiendas ni otros 8-K); corto al cierre del día 0.
+    sec = public_data.DIR / "sec"
+    pd.DataFrame({"form": pd.Series([], dtype=str), "items": pd.Series([], dtype=str),
+                  "accepted": pd.Series([], dtype="datetime64[ns, UTC]")}).to_parquet(sec / "1.parquet")
+    when = [p.dates[k].tz_localize(public_data.NY) + pd.Timedelta(hours=17) for k in (300, 320, 340, 360, 380)]
+    pd.DataFrame({"form": ["NT 10-K", "NT 10-K/A", "8-K", "8-K", "NT 10-Q"],
+                  "items": ["", "", "4.02,9.01", "2.02", ""],
+                  "accepted": pd.Series(when).dt.tz_convert("UTC")}).to_parquet(sec / "3.parquet")
+    news = lab.bad_news(p)
+    assert list(news.ticker) == ["BBB"] * 3 and list(news.d0) == [301, 341, 381], news  # tras el cierre: sesión siguiente
+    h6 = lab.h6(p, news, {"hold": 5})
+    assert list(h6.e) == [301, 341, 381] and list(h6.x) == [306, 346, 386] and set(h6.side) == {-1}, h6
+
+    # H7: ventas de al menos 2 o 3 directivos distintos en 30 días y 1 millón en total -> corto en la sesión siguiente.
+    sells = pd.DataFrame({"ticker": ["CCC"] * 3, "filed": [p.dates[200], p.dates[205], p.dates[210]],
+                          "owner": [1, 2, 3], "value": [600e3] * 3})
+    two = lab.h7(p, sells, {"insiders": 2, "usd": 1_000_000, "hold": 21})
+    three = lab.h7(p, sells, {"insiders": 3, "usd": 1_000_000, "hold": 21})
+    assert list(two.e) == [206] and list(three.e) == [211] and set(two.side) == {-1} and two.fee_day[0] > 0, (two, three)
+    assert lab.h7(p, sells.assign(value=300e3), {"insiders": 3, "usd": 1_000_000, "hold": 21}).empty  # 900.000: no
+
 
 if __name__ == "__main__":
     checks = [check_cache, check_risk, check_agents, check_boss_decision, check_lifecycle, check_evolution,
