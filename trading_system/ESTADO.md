@@ -259,6 +259,45 @@ datos que están de acceso público de los gobiernos y las empresas en sus propi
   - **Siguiente ronda, solo si el usuario la pide.** Se escribe aquí antes de mirar, con t ≥ 2,8 porque ya van 4
     hipótesis. El periodo reservado (2023–hoy) sigue sin mirar.
 
+## Segunda ronda con datos públicos (23-11, escrito antes de ver ningún resultado)
+
+El usuario pidió "Sí, otra ronda". Son tres ideas nuevas, no las de la primera ronda con otros números. Las tres
+apuestan a la baja frente a su grupo, porque la literatura las respalda sobre todo en ese sentido.
+
+- **Igual que en la primera ronda:**
+  - mismos datos (SEC, tamaño en cada fecha, grupos 500/400/600, limpieza de precios) y mismos costes;
+  - mismos periodos: entrenamiento 2010–2017, examen 2018–2022 y reservado de 2023 a hoy, que sigue sin mirar;
+  - misma elección: gana la variante con más t en el entrenamiento, si tiene al menos 100 operaciones; con t
+    menor que 2, la idea se descarta sin examen.
+- **Coste añadido:** las ventas en corto pagan un 3 % anual por el préstamo de las acciones, cobrado por cada
+  sesión abierta. Es caro a propósito, para acciones con malas noticias.
+- **Hipótesis:**
+  - **H5, resultados que se retrasan.** Sostén: Bagnoli, Kross y Watts 2002; Johnson y So 2018.
+    - Fecha esperada = la del mismo trimestre del año anterior + 364 días, como en H3.
+    - Si k sesiones después no ha salido el comunicado de ese trimestre (ninguno desde 45 días antes de la fecha
+      esperada), se vende en corto al cierre de esa sesión.
+    - Se cierra al cierre del día siguiente a la primera reacción al comunicado, o a las M sesiones si no llega.
+    - Variantes: k = 2 o 5; M = 10 o 30. Son 4.
+  - **H6, avisos de mala noticia en la SEC.** Sostén: Alford, Jones y Zmijewski 1994; Palmrose, Richardson y
+    Scholz 2004.
+    - Eventos: formularios NT 10-K y NT 10-Q (avisan de que las cuentas no llegarán a tiempo) y 8-K con el
+      punto 4.02 (las cuentas anteriores ya no son fiables).
+    - Corto al cierre de la primera sesión en que el precio puede reaccionar.
+    - Se mantiene 5, 21 o 63 sesiones. Son 3 variantes.
+  - **H7, ventas en racimo de directivos.** Sostén: Jeng, Metrick y Zeckhauser 2003; Cohen, Malloy y Pomorski
+    2012.
+    - Ventas en bolsa (código S) de consejeros o directivos: al menos 2 o 3 personas distintas en 30 días y al
+      menos 1 millón de USD en total.
+    - Corto al cierre de la sesión siguiente a la presentación.
+    - Se mantiene 21 o 63 sesiones. Son 4 variantes.
+- **Aprobado:**
+  - **Examen:** al menos 100 operaciones, t ≥ 2,8 y al menos 3 de los 5 años en positivo.
+  - **Periodo reservado:** al menos 100 operaciones, media positiva y t ≥ 1,65.
+  - **Por qué 2,8.** Con las 4 de la primera ronda son 7 hipótesis: la corrección de Bonferroni pide 2,69 y se
+    usa 2,8.
+- **Si alguna aprueba.** Son operaciones de días o semanas, a la baja. No caben en la cuenta de fondeo actual,
+  que cierra todo cada día, así que irían como cartera aparte en simulación, y se decide con el usuario.
+
 ## Pendientes, por orden
 
 Los pendientes 1 y 5 solo se pueden comprobar en el ordenador del usuario; desde la nube fue imposible.
