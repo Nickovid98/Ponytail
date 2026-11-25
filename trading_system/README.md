@@ -461,6 +461,20 @@ venv/bin/python event_lab.py holdout    # una sola vez: de 2023 a hoy, solo lo q
 venv/bin/python event_lab.py train --round 2   # la segunda ronda (H5-H7), con su propio umbral
 ```
 
+## ¿Cobrar rápido en una cuenta de fondeo? (`prop_plan.py`)
+
+Simula el plan de pagar una evaluación de 50K, pasarla y cobrar en cuanto se pueda, con las reglas reales de seis
+cuentas (Topstep, Topstep Labs, Lucid, Tradeify y MyFundedFutures, verificadas el 25-11-2026) y los resultados
+diarios de una simulación guardada con `backtest.py --save`:
+
+```bash
+venv/bin/python prop_plan.py data/lab/bt_stocks_365d.json
+```
+
+El 25-11, con los bots tal como están, menos de 2 de cada 100 intentos cobraban 500 o más en dos semanas, incluso
+arriesgando 5 veces más por operación. Cifras y fuentes, en `ESTADO.md`. Las reglas cambian: antes de pagar,
+compruébalas en la web de cada empresa.
+
 ## La app (`dashboard.py`)
 
 Solo escucha en `localhost` (`.streamlit/config.toml`): tiene el kill switch y

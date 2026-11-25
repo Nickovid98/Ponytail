@@ -1,6 +1,6 @@
 # Estado del proyecto
 
-Actualizado el 24-11-2026. Quien cierre una tarea actualiza este archivo en el mismo commit.
+Actualizado el 25-11-2026. Quien cierre una tarea actualiza este archivo en el mismo commit.
 
 ## En una pantalla
 
@@ -28,6 +28,10 @@ Actualizado el 24-11-2026. Quien cierre una tarea actualiza este archivo en el m
 - **Objetivo.** 500 USD por semana o más sobre una cuenta de fondeo de 50.000 (son 26.000 al año, un 52 %), con
   el bot eliminado al perder 2.000 y relevado por otro que hereda lo aprendido. Después pidió "por lo menos entre
   40 % y 50 % rentable": no está claro si es rentabilidad anual o porcentaje de operaciones ganadoras.
+  El 25-11 lo precisó: "la idea es poder retirar diariamente dinero, pagar la cuenta y todo sus requerimentos y
+  retirar dinero por lo menos una semana, intentar retirar minimo entre 500 a 1000 dolares semanales, no importa que
+  la cuenta muera en una semana". Es decir: pagar una evaluación, pasarla y cobrar 500–1.000 en una o dos semanas.
+  Las cifras de ese plan están en "Cobrar rápido en una cuenta de fondeo".
 - **Sus límites para dinero propio.** Capital 3.550, pérdida total 500, stop ≤ 5 %, riesgo 1 % (techo 2 %).
 - **Sus acciones.** NVDA, META, GOOGL, TTWO, MU, MSFT, UBER.
 - **Topstep.** Ahora mismo no tiene cuenta. El modo está hecho y sin probar contra el servicio real.
@@ -336,6 +340,78 @@ apuestan a la baja frente a su grupo, porque la literatura las respalda sobre to
   - **Balance de las dos rondas.** 7 ideas publicadas, 33 variantes y ninguna con ventaja después de costes. El
     periodo reservado (de 2023 a hoy) sigue sin mirar.
 
+## Cobrar rápido en una cuenta de fondeo (25-11)
+
+Pregunta del usuario: ¿se puede pagar una cuenta de fondeo, pasarla y cobrar 500–1.000 en una o dos semanas, aunque
+la cuenta muera después? Las reglas se verificaron el 25-11-2026 en las páginas oficiales de cada empresa (centros de
+ayuda y condiciones de topstep.com, Lucid, tradeify.co, myfundedfutures.com, takeprofittrader.com,
+tradethepool.com, ftmo.com, hyrotrader.com y Kraken Prop), con un segundo revisor por empresa. Pueden cambiar.
+
+- **Quién deja usar el bot del usuario:**
+  - **Topstep:** sí, en la evaluación y en la cuenta financiada simulada, solo por su API (14,50 USD/mes con
+    código, 29 sin él), sin servidores remotos, VPN ni alta frecuencia. En la cuenta real (Live), no.
+  - **Lucid, Tradeify y MyFundedFutures:** también permiten bots (Tradeify pide un vídeo del usuario activándolo),
+    pero usan Tradovate o Rithmic y el sistema solo tiene conector para TopstepX.
+  - **Las prohíben:** Take Profit Trader, Trade The Pool (acciones) y Kraken Prop (cripto).
+  - **FTMO** las permite, pero no paga hasta 14 días después de estar financiado. **HyroTrader** (cripto) las
+    permite si la estrategia es propia.
+  - **Colombia** no está en ninguna lista de países excluidos.
+- **Topstep 50K, la única que el sistema puede operar hoy** (con el conector sin probar contra el servicio real):
+  - **Precio:** 49 USD al mes más 149 de activación, o 95 al mes sin activación, más la API.
+  - **Evaluación:** objetivo +3.000, con el mejor día como mucho el 55 % del beneficio, y 2.000 de pérdida máxima
+    sobre el mejor cierre, vigilada también dentro del día.
+  - **Cobros en la cuenta financiada:**
+    - el más rápido, cada 3 días de operación, con el mejor día como mucho el 40 % del beneficio;
+    - hasta el 50 % del saldo, con tope de 3.000, y el 90 % para el trader;
+    - transferencia internacional de 30 USD, con 1–3 días hábiles de aprobación y 5–10 de transferencia;
+    - tras el primer cobro, el suelo de la cuenta pasa a 0.
+  - **Cobro diario:** no lo tiene en la cuenta financiada normal. "Topstep Labs Daily Payouts+" (119 USD, cobros
+    de 250 a 1.500 al día por encima de un colchón de 2.000) se anunció en noviembre, pero su venta no está
+    confirmada.
+- **Cuántos cobran de verdad.** Cifras publicadas por las propias empresas o por un proveedor del sector, sin
+  auditar:
+  - **Topstep 2025:** aprobó el 16,8 % de las evaluaciones, y el 33,3 % de quienes llegaron a financiada cobró
+    algo en todo el año; eso es alrededor del 17 % de las personas, con compras repetidas.
+  - **Tradeify y MyFundedFutures:** 28–39 % de los financiados cobra algo.
+  - **Entre 10 empresas** (FPFX): 14 % aprueba y 7 % de los clientes cobra alguna vez. Bloomberg habla de un 4 %.
+  - **Fuera de las empresas:** el 97 % de quienes hicieron day trading de futuros en Brasil durante más de 300
+    días perdió dinero (Chague y otros).
+- **Simulación** (`prop_plan.py`):
+  - **Método.** Cada intento sorteó, día a día, resultados reales de los bots. Salen de los 262 días de la
+    simulación de un año con las acciones del usuario (`backtest.py --lineage 2000 --flat`, guardada en
+    `data/lab/bt_stocks_365d.json`): 496 operaciones, −1.706 netos, 7 de 53 semanas con 500 o más, media diaria
+    −6,5 y desviación 197.
+  - **Optimista en dos cosas.** El suelo solo se mira al cierre del día y no se cuentan las comisiones de futuros.
+  - **Resultado** (20.000 intentos por casilla; "riesgo x5" son unos 1.000 USD por operación):
+
+  | Empresa (precio) | Cobra ≥ 500 en 2 semanas, riesgo x1 | Ídem, riesgo x5 | Cobra ≥ 500 en 4 semanas, riesgo x5 | Neto medio por intento, 4 semanas, x5 |
+  |---|---|---|---|---|
+  | Topstep 50K estándar (212) | 0 % | 0,2 % | 2,0 % | −172 |
+  | Topstep 50K sin activación (110) | 0 % | 0,2 % | 2,1 % | −69 |
+  | Topstep Labs cobro diario (134, venta sin confirmar) | 0 % | 1,4 % | 7,5 % | +36 |
+  | Lucid 50K diario (94; sin conector) | 0 % | 0,4 % | 3,5 % | −18 |
+  | Tradeify Select Daily (174; sin conector) | 0 % | 0,4 % | 3,3 % | −106 |
+  | MyFundedFutures Rapid (209; sin conector) | 0 % | 0,8 % | 4,2 % | −109 |
+
+- **Lo que dice.**
+  - **Con el riesgo actual** (200 por operación), los bots no pasan una evaluación en semanas: hacen falta meses
+    incluso sin pérdida media.
+  - **Arriesgando 5 veces más**, cobrar 500 o más en dos semanas ocurre en menos de 2 intentos de cada 100. En
+    cuatro semanas, entre 2 y 7,5 de cada 100. Casi siempre se pierde lo pagado.
+  - **Topstep Labs:** es la única con media positiva (+36), dentro del margen de lo optimista de la simulación, y
+    no está confirmado que se pueda comprar.
+  - **El dinero llega tarde:** aunque salga bien, en Colombia llega 1–2 semanas después de pedirlo.
+  - **En la práctica es un billete de lotería con esperanza negativa.** Encaja con el 4–17 % de clientes que
+    cobran alguna vez.
+- **Noticias:** no hace falta nada para lo que hay. El bot Macro no puntúa titulares porque no hay clave de
+  Anthropic, y las fuentes gratuitas que mejor encajan (Alpaca News, con cuenta gratuita, y los RSS de la Reserva
+  Federal y de las suspensiones de Nasdaq) no han demostrado mejorar nada.
+- **Herramientas de GitHub revisadas, no añadidas:**
+  - `LuxAlgo/prop-firm-sim` (MIT, 120 estrellas) hace lo mismo que `prop_plan.py`; su autor vende cupones de esas
+    empresas.
+  - `TexasCoding/project-x-py` (MIT) y la documentación oficial de ProjectX sirven para revisar `utils/topstepx.py`
+    antes de usarlo de verdad; queda como pendiente si el usuario elige Topstep.
+
 ## Pendientes, por orden
 
 Los pendientes 1 y 5 solo se pueden comprobar en el ordenador del usuario; desde la nube fue imposible.
@@ -612,3 +688,9 @@ del usuario.
     - Cuatro actualizadas: `free-llm-apis`, `session-metrics`, `managed-pentesting-with-strix` y `design-is`.
     - Lo que no se instaló y por qué, en `.claude/skills/README.md`. Sus programas no se han ejecutado en el PC: el
       control de seguridad de Claude Code no lo dejó sin la aprobación del usuario.
+19. **25-11, cobrar rápido en una cuenta de fondeo.** "la idea es poder retirar diariamente dinero [...] minimo entre
+    500 a 1000 dolares semanales, no importa que la cuenta muera [...] si necesitas algo para conectarte a noticias o
+    algo dimelo, si vez en redes sociales o github cosas para agregar, agregalas".
+    - Reglas reales de nueve empresas verificadas en sus páginas oficiales y tasas de cobro publicadas.
+    - `prop_plan.py`, que simula el plan con los días reales de los bots (con `selfcheck.py prop`).
+    - Resultado: menos de 2 de cada 100 intentos cobran 500 o más en dos semanas, incluso arriesgando 5 veces más.

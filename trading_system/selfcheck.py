@@ -2077,10 +2077,44 @@ def check_public():
     assert lab.h7(p, sells.assign(value=300e3), {"insiders": 3, "usd": 1_000_000, "hold": 21}).empty  # 900.000: no
 
 
+def check_prop():
+    """prop_plan.py: las reglas de las cuentas de fondeo (ESTADO.md, "Cobrar rápido en una cuenta de fondeo")."""
+    import prop_plan as pp
+
+    def run(name, days, horizon=10):
+        seq = iter(days)
+        return pp.attempt(lambda: next(seq), pp.FIRMS[name], horizon)
+
+    # Topstep: aprueba el día 3 (+3.000, mejor día 1.000 <= 55 %); cobra cada 3 días el 50 % del saldo (90 % para ti,
+    # menos 30 de transferencia): 1.500 el día 6 y 2.250 el día 9.
+    net, ok = run("Topstep 50K estándar", [1000.0] * 10)
+    assert ok and abs(net - (0.9 * 1500 - 30 + 0.9 * 2250 - 30 - (49 + 149 + 14.5))) < 1e-9, net
+    assert run("Topstep 50K estándar", [-1000.0] * 10) == (-(49 + 149 + 14.5), False)  # 2.000 abajo: perdida
+    assert run("Topstep 50K estándar", [3000.0] + [100.0] * 9)[1] is False  # un día de más del 55 %: no aprueba
+    # Labs: colchón de 2.000; cada día en positivo cobra hasta 1.500 de lo que pase del colchón.
+    net, ok = run("Topstep Labs cobro diario", [1000.0] * 10)
+    assert ok and abs(net - (5 * (0.9 * 1000 - 30) - (119 + 14.5))) < 1e-9, net
+    net, _ = run("Topstep Labs cobro diario", [1000.0] * 5 + [2000.0, 0.0], horizon=7)
+    assert abs(net - (0.9 * 1500 - 30 - (119 + 14.5))) < 1e-9, net  # el día en 0 no da cobro aunque sobre colchón
+    net, ok = run("Topstep Labs cobro diario", [-3000.0] + [1000.0] * 9)  # el límite diario corta en -1.000: sigue viva
+    assert ok and abs(net - (3 * (0.9 * 1000 - 30) - (119 + 14.5))) < 1e-9, net
+    # Topstep no paga si el mejor día desde el último cobro pasa del 40 % del beneficio.
+    net, _ = run("Topstep 50K estándar", [1000.0] * 3 + [2000.0, 500.0, 500.0, 0.0], horizon=7)
+    assert net == -(49 + 149 + 14.5), net
+    # Lucid: cobra todo lo que pase de +2.100 (mínimo 500).
+    net, ok = run("Lucid 50K diario", [1000.0] * 10)
+    assert ok and abs(net - (0.9 * (900 + 4 * 1000) - 94)) < 1e-9, net
+    # Tras el primer cobro de Topstep el suelo es 0: un mal día que deja el saldo por debajo de 0 cierra la cuenta,
+    # aunque con el suelo de antes (-2.000 desde el mejor cierre) habría seguido viva y cobrado otra vez.
+    net, ok = run("Topstep 50K estándar", [1000.0] * 3 + [500.0] * 3 + [-800.0] + [400.0] * 5, horizon=12)
+    assert ok and abs(net - (0.9 * 750 - 30 - (49 + 149 + 14.5))) < 1e-9, net
+
+
 if __name__ == "__main__":
     checks = [check_cache, check_risk, check_agents, check_boss_decision, check_lifecycle, check_evolution,
               check_tokens_and_alerts, check_ccxt_broker, check_macro, check_optimizer, check_app, check_orb,
-              check_backtest, check_alpaca, check_topstepx, check_funded, check_scenarios, check_public]
+              check_backtest, check_alpaca, check_topstepx, check_funded, check_scenarios, check_public,
+              check_prop]
     names = [c.__name__[6:] for c in checks]
     wanted = set(sys.argv[1:])  # sin argumentos, todas; `selfcheck.py optimizer app` ejecuta solo esas dos
     if wanted - set(names):
@@ -2111,4 +2145,4 @@ if __name__ == "__main__":
               "(muerte, mutación, persistencia), tokens, alertas, broker CCXT, macro, recompensas y optimizador, "
               "controles de la app, ORB, backtest con validación fuera de muestra, datos de Alpaca, TopstepX "
               "(API falsa local, kill switch, sesión y frecuencia), acciones con Yahoo, cuenta de fondeo simulada, bot de escenarios "
-              "y datos públicos (SEC, Reserva Federal, BLS) con su laboratorio")
+              "y datos públicos (SEC, Reserva Federal, BLS) con su laboratorio y las reglas de las cuentas de fondeo reales")

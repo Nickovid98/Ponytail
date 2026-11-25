@@ -44,7 +44,7 @@ consulta solo la sección que toque (`grep -n '^#' README.md`).
 
 `selfcheck OK` es obligatorio antes de cada commit; la pasada parcial sirve para iterar y no lo sustituye.
 Comprobaciones: `cache risk agents boss_decision lifecycle evolution tokens_and_alerts ccxt_broker macro optimizer
-app orb backtest alpaca topstepx funded scenarios public`. Solo `backtest` es lenta (50 s).
+app orb backtest alpaca topstepx funded scenarios public prop`. Solo `backtest` es lenta (50 s).
 
 ## Mapa (salta con `grep -n "def nombre"`, no leas archivos enteros)
 
@@ -69,6 +69,7 @@ app orb backtest alpaca topstepx funded scenarios public`. Solo `backtest` es le
 | `scenario_exam.py` | examen fuera de muestra del bot de escenarios (cripto 2 años por CCXT, acciones 60 días por Yahoo) | `crypto_bets`, `stock_bets`, `chosen`, `report` |
 | `utils/public_data.py` | datos públicos sin clave: SEC (resultados, formularios 4, tamaño), State Street, Reserva Federal, BLS, Yahoo | `universe`, `filings`, `earnings`, `insider`, `floats`, `daily`, `hourly`, `calendar` |
 | `event_lab.py` | laboratorio de H1-H7 con datos públicos (protocolo en `ESTADO.md`): `download`, `train`, `exam`, `holdout` (`--round 2` para H5-H7) | `Panel`, `clean`, `pit_groups`, `h1`-`h7`, `stats`, `h4_stats`, `passes` |
+| `prop_plan.py` | el plan de pagar una cuenta de fondeo y cobrar rápido, con las reglas reales de 6 cuentas (verificadas el 25-11) y los días de un `backtest.py --save` | `FIRMS`, `attempt`, `odds` |
 | `dashboard.py` | la app (Streamlit): una función por pestaña | `control_room`, `bots_room`, `boss_room`, `lab`, `settings` |
 | `selfcheck.py` | la batería: una función `check_*` por área | |
 
