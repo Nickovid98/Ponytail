@@ -3,6 +3,98 @@
 All notable changes to the session-metrics skill.
 Versions match the `plugin.json` / `marketplace.json` version field.
 
+## v1.95.0 — 2026-11-23
+
+### Price GLM-4.5-Air; resolve `z-ai/glm-4.7` and `z-ai/glm-5` (minor)
+
+- **GLM-4.5-Air.** `glm-4.5-air` had no entry and was billed at the Sonnet
+  default ($3 / $15, cache read $0.30) with an unknown-model warning. It now
+  has its own key `z-ai/glm-4.5-air` at OpenRouter's rate (2026-11-23):
+  $0.13 / $0.85, cache read $0.025, plus a `glm-4\.5(?!\d).*air\b` guard. Base
+  `glm-4.5` and `glm-4.5v` stay unkeyed and still warn.
+- **`z-ai/` aliases.** `z-ai/glm-4.7` and `z-ai/glm-5` (and suffixed forms
+  such as `z-ai/glm-5-20260101`) matched no key and fell to the Sonnet default
+  with a warning. They are now aliases that share the bare `glm-4.7` /
+  `glm-5` rate object, so a future re-snapshot updates both. The `glm-5.x`
+  guards and exact `z-ai/` keys still take precedence.
+- `references/pricing.md` gains the rows and a note. `tests/test_pricing.py`
+  adds tests for both id forms, the shared rate object, and base `glm-4.5`
+  still warning.
+
+## v1.94.0 — 2026-11-23
+
+### Recognise GLM-5.3-Prime, GLM-5V-Turbo and GLM-4.7-Flash (minor)
+
+Three GLM models listed on OpenRouter had no key of their own and were
+billed as a neighbouring model (input / output / cache read, $ per 1M):
+
+| Model            | Was billed as                    | Now (OpenRouter, 2026-11-23) |
+|------------------|----------------------------------|------------------------------|
+| `glm-5.3-prime`  | base GLM-5.3 (0.0699 / 1.40 / 0.0689), silent | 1.68 / 5.28 / 0.336 |
+| `glm-5v-turbo`   | bare `glm-5` (1.00 / 3.20 / 0.20), silent     | 1.20 / 4.00 / 0.24  |
+| `glm-4.7-flash`  | `glm-4.7` (0.60 / 2.20 / 0.11), silent        | 0.0605 / 0.40 / 0   |
+
+The `z-ai/glm-5v-turbo` and `z-ai/glm-4.7-flash` forms fell to the Sonnet
+default ($3 / $15) with a warning.
+
+- New keys `z-ai/glm-5.3-prime`, `z-ai/glm-5v-turbo`, `z-ai/glm-4.7-flash`
+  and guards in `_PRICING_PATTERNS`: `glm-5\.3(?!\d).*prime\b` (before the
+  base 5.3 pattern), `glm-5v-turbo\b`, `glm-4\.7(?!\d).*flash\b`.
+- GLM-4.7-Flash has `cache_read` 0 because OpenRouter publishes no cache-read
+  rate for it. `test_pricing_glm_deepseek_bill_cache_reads_not_writes` names
+  it as the one exception.
+- `references/pricing.md` gains the three rows and a note.
+  `tests/test_pricing.py` adds a test covering all three (both id forms),
+  plus checks that `glm-4.7` and `glm-5.3-flash` are unaffected.
+
+## v1.93.1 — 2026-11-23
+
+### Re-snapshot GLM pricing from OpenRouter (patch)
+
+Every stored GLM rate was checked against OpenRouter `/api/v1/models` on
+2026-11-23. Seven had drifted since the 2026-09-23 snapshot (v1.90.1)
+(input / output / cache read, $ per 1M tokens):
+
+| Key                  | Was                       | Now                     |
+|----------------------|---------------------------|-------------------------|
+| `glm-4.7`            | 0.40 / 1.75 / 0.08        | 0.60 / 2.20 / 0.11      |
+| `glm-5`              | 0.60 / 1.92 / 0.12        | 1.00 / 3.20 / 0.20      |
+| `glm-5.1`            | 0.966 / 3.036 / 0.1794    | 1.40 / 4.40 / 0.26      |
+| `glm-5.2`            | 0.6496 / 2.0416 / 0.12064 | 0.62 / 2.42 / 0.14      |
+| `z-ai/glm-5.3-flash` | 0.15 / 0.50 / 0.05        | 0.0399 / 0.0784 / 0.03  |
+| `z-ai/glm-5.3`       | 0.6538 / 2.0548 / 0.12142 | 0.0699 / 1.40 / 0.0689  |
+
+`glm-5`'s change also reprices every id that falls back to the bare `glm-5`
+prefix. `z-ai/glm-5.3-flashx` and `z-ai/glm-5-turbo` were unchanged. Cache
+writes stay $0 (OpenRouter charges no write premium).
+
+- **GLM-5.4 is unchanged.** OpenRouter has no `glm-5.4` entry, so it keeps
+  the provisional v1.93.0 rate ($0.6538 / $2.0548 / $0.12142, the
+  pre-re-snapshot `glm-5.3` value).
+- **OpenRouter vs z.ai.** OpenRouter's GLM-5.3 ($0.0699 input) is far below
+  z.ai's own list price ($1.40 / $4.40 / $0.26); GLM-5.3-Flash lists at
+  $0.15 / $0.50 / $0.03 on z.ai. `references/pricing.md` notes the gap.
+  Reports keep using OpenRouter.
+- Historical turns reprice at the new rates (OpenRouter publishes no
+  effective dates). `tests/test_pricing.py` expectations follow the new rates.
+
+## v1.93.0 — 2026-11-23
+
+### Recognise GLM-5.4 at a provisional rate (minor)
+
+- **Pricing fix.** `glm-5.4`, `glm-5.4[1m]` and suffixed forms silently
+  prefix-matched the bare `glm-5` key ($0.60 / $1.92, cache read $0.12) with
+  no unknown-model warning. `z-ai/glm-5.4` fell to the Sonnet default
+  ($3 / $15) with a warning.
+- **New key `z-ai/glm-5.4`**, plus a `glm-5\.4(?!\d)` guard in
+  `_PRICING_PATTERNS`. GLM-5.4 had no published rate on 2026-11-23 (it is
+  not listed on OpenRouter or the docs.z.ai pricing page), so it is billed at
+  the `glm-5.3` rate: $0.6538 / $2.0548, cache read $0.12142. Re-price once a
+  rate is published. Any `glm-5.4-flash*` id uses the same base rate for now.
+- `references/pricing.md` gains a provisional GLM-5.4 row and note.
+  `tests/test_pricing.py` adds `glm-5.4`, `z-ai/glm-5.4`, `glm-5.4[1m]` and a
+  `glm-5.40` case, which still falls back to `glm-5`.
+
 ## v1.92.0 — 2026-11-10
 
 ### Claude Fable 5.2 and Mythos 5 / 5.1 / 5.2 pricing, fast mode (minor)

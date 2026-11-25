@@ -2,7 +2,61 @@
 
 Third-party platforms that host open-weight models from various sources.
 
-<!-- Generated from data.json by scripts/generate-skill.js (data last updated 2026-10-25). Do not edit by hand. -->
+<!-- Generated from data.json by scripts/generate-skill.js (data last updated 2026-11-15). Do not edit by hand. -->
+
+## AxForge 🇮🇪
+
+Permanent free tier, no credit card required: 3M tokens every 30 days, shared across models. Open models hosted in the EU (Stockholm, Sweden). OpenAI SDK-compatible.
+
+**Notes:** AxForge's free tier: every account gets 3M tokens every 30 days, counted across all its serverless models, with no credit card ([pricing](https://axforge.ai/pricing/)). After that, calls are paid from a prepaid balance. `qwen3.8-27b` serves up to 16 concurrent sequences, then requests queue. Hosted on AxForge's own hardware in Stockholm, Sweden; prompts and completions are not stored, not logged and never used for training.
+
+**Get a key:** https://console.axforge.ai/
+
+**OpenAI-compatible base URL:** `https://api.axforge.ai/v1`
+
+### Models
+
+| Model ID | Context | Modality | Rate limit |
+| --- | --- | --- | --- |
+| `qwen3.8-27b` | 262K | Text + Vision | 3M tokens/30 days (shared) |
+| `qwen3.8-flash-next` | 500K | Text + Vision | 3M tokens/30 days (shared) |
+| `glm-5.3-flash` | 500K | Text + Vision | 3M tokens/30 days (shared) |
+| `mimo-v2.6-flash` | 262K | Text + Vision | 3M tokens/30 days (shared) |
+
+### Environment variable
+
+```bash
+export AXFORGE_API_KEY="your-key-here"
+```
+
+### Usage example
+
+```python
+import os
+from openai import OpenAI
+
+client = OpenAI(
+    api_key=os.environ["AXFORGE_API_KEY"],
+    base_url="https://api.axforge.ai/v1",
+)
+
+response = client.chat.completions.create(
+    model="qwen3.8-27b",
+    messages=[{"role": "user", "content": "Say hello in one sentence."}],
+)
+print(response.choices[0].message.content)
+```
+
+### Quick test
+
+```bash
+curl -s https://api.axforge.ai/v1/chat/completions \
+  -H "Authorization: Bearer $AXFORGE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "qwen3.8-27b", "messages": [{"role": "user", "content": "Say hello"}]}'
+```
+
+---
 
 ## Cloudflare Workers AI 🇺🇸
 
@@ -25,7 +79,6 @@ Third-party platforms that host open-weight models from various sources.
 | `@cf/google/gemma-4-26b-a4b-it` | 256K | Text + Vision | 10K neurons/day (shared) |
 | `@cf/zai-org/glm-4.7-flash` | 131K | Text | 10K neurons/day (shared) |
 | `@cf/mistralai/mistral-small-3.1-24b-instruct` | 128K | Text + Vision | 10K neurons/day (shared) |
-| `@cf/deepseek-ai/deepseek-r1-distill-qwen-32b` | 80K | Text (reasoning) | 10K neurons/day (shared) |
 | + 55 more models | Varies | Text, Image, Audio, Embeddings | 10K neurons/day (shared) |
 
 ### Environment variable
@@ -122,7 +175,7 @@ curl -s https://proxy.gonkabroker.com/v1/chat/completions \
 
 Free tier, no credit card. Ultra-fast LPU inference.
 
-**Notes:** Groq shut down qwen/qwen3.6-27b on September 14, 2026 (replaced by qwen/qwen3.8-27b) and groq/compound and groq/compound-mini on September 21, 2026 ([deprecations](https://console.groq.com/docs/deprecations)). Free-plan limits vary by model; the chat models listed get 1,000 RPD ([rate limits](https://console.groq.com/docs/rate-limits)).
+**Notes:** Groq shut down qwen/qwen3.6-27b on September 14, 2026 (replaced by qwen/qwen3.8-27b) and groq/compound and groq/compound-mini on September 21, 2026 ([deprecations](https://console.groq.com/docs/deprecations)). Free-plan limits vary by model; the chat models listed get 30 RPM, 1,000 RPD, 8,000 TPM, and 200,000 TPD on the official [Free Plan Limits](https://console.groq.com/docs/rate-limits) table. Exact organization limits are on the account limits page.
 
 **Get a key:** https://console.groq.com/keys
 
@@ -132,9 +185,9 @@ Free tier, no credit card. Ultra-fast LPU inference.
 
 | Model ID | Context | Modality | Rate limit |
 | --- | --- | --- | --- |
-| `openai/gpt-oss-120b` | 131K | Text | 30 RPM, 1,000 RPD |
-| `openai/gpt-oss-20b` | 131K | Text | 30 RPM, 1,000 RPD |
-| `qwen/qwen3.8-27b` | 131K | Text + Image | 30 RPM, 1,000 RPD |
+| `openai/gpt-oss-120b` | 131K | Text | 30 RPM, 1,000 RPD, 8,000 TPM, 200,000 TPD |
+| `openai/gpt-oss-20b` | 131K | Text | 30 RPM, 1,000 RPD, 8,000 TPM, 200,000 TPD |
+| `qwen/qwen3.8-27b` | 131K | Text + Image | 30 RPM, 1,000 RPD, 8,000 TPM, 200,000 TPD |
 
 ### Environment variable
 
@@ -175,7 +228,7 @@ curl -s https://api.groq.com/openai/v1/chat/completions \
 
 Free models with no credit card and no API key required. `kilo-auto/free` auto-router dynamically routes to models in the free pool.
 
-**Notes:** Kilo Code's free pool changes frequently, and the /api/gateway/models catalog can lag what is actually served: probe results have confirmed models absent from the catalog still answering. Rows through liquid/lfm-2.5-2.6b:free answered a live request between 2026-08-19 and 2026-08-21; the rows after it were added on 2026-10-05 (through dots-studio/dots-3-note-preview:free), 2026-10-23 and 2026-10-25 from the catalog, where they are priced at $0, and have not been probed. The catalog describes reflection/beam-free as served through Vercel AI Gateway and notes that prompts may be retained for training. Free models are reachable with no API key, at 200 requests per hour per IP ([authentication](https://kilo.ai/docs/gateway/authentication)). The kilo-auto/free router picks a model from the free pool, and Kilo's docs warn it "may route your requests to providers that log prompts and outputs". The NVIDIA free endpoints carry NVIDIA's own condition, quoted on Kilo's [models page](https://kilo.ai/docs/gateway/models-and-providers): "Trial use only - do not submit personal or confidential data. Your use is logged for security purposes and to improve NVIDIA products and services."
+**Notes:** Kilo Code's free pool changes frequently, and the /api/gateway/models catalog can lag what is actually served: probe results have confirmed models absent from the catalog still answering. Rows through liquid/lfm-2.5-2.6b:free answered a live request between 2026-08-19 and 2026-08-21; the rows after it were added on 2026-10-05, 2026-10-23 and 2026-10-25 from the catalog, where they are priced at $0, and have not been probed. Free models are reachable with no API key, at 200 requests per hour per IP ([authentication](https://kilo.ai/docs/gateway/authentication)). The kilo-auto/free router picks a model from the free pool, and Kilo's docs warn it "may route your requests to providers that log prompts and outputs". The NVIDIA free endpoints carry NVIDIA's own condition, quoted on Kilo's [models page](https://kilo.ai/docs/gateway/models-and-providers): "Trial use only - do not submit personal or confidential data. Your use is logged for security purposes and to improve NVIDIA products and services."
 
 **Get a key:** https://app.kilo.ai/profile (optional: free models work without a key)
 
@@ -187,13 +240,10 @@ Free models with no credit card and no API key required. `kilo-auto/free` auto-r
 | --- | --- | --- | --- |
 | `nvidia/nemotron-3-ultra-550b-a55b:free` | 1M | Text | 200 req/hr |
 | `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` | 256K | Multimodal | 200 req/hr |
-| `cohere/north-mini-code:free` | 256K | Text (code) | 200 req/hr |
 | `openrouter/free` | Varies | Text | 200 req/hr |
 | `nvidia/nemotron-3.5-lightning:free` | 1M | Text | 200 req/hr |
 | `kilo-auto/free` | 256K | Text | 200 req/hr |
-| `dots-studio/dots-3-note-preview:free` | 512K | Text + Vision | 200 req/hr |
 | `nvidia/nemotron-3.5-super-vl:free` | 1M | Multimodal | 200 req/hr |
-| `reflection/beam-free` | 1M | Text | 200 req/hr |
 | `stealth/glyph-cluster` | 256K | Text (code) | 200 req/hr |
 
 ### Environment variable
@@ -233,9 +283,9 @@ curl -s https://api.kilo.ai/api/gateway/chat/completions \
 
 ## LLM7.io 🇬🇧
 
-API gateway with a free tier. Anonymous access needs no key and reaches the `turbo` models; a free token from token.llm7.io raises the rate and token limits but reaches the same models.
+API gateway whose `turbo` models answer with no key and no account. LLM7 no longer documents this free access or its limits, so it can end without notice.
 
-**Notes:** LLM7.io rotates its catalog frequently, so the model list changes between checks. Access is tier-based, not token-based: `turbo` models are reachable anonymously or with a free token, `pro` models need the paid plan ([models API](https://docs.llm7.io/guides/models-api)). A free token is capped at 1 RPS, 60 RPM, 250 requests per hour and 100,000 tokens per 24 hours, and the free quota may be reduced without notice ([limits](https://docs.llm7.io/limits)). A paid Pro plan is available at $12/month. The docs no longer list anonymous (no-key) limits; anonymous access was last confirmed by live request on 2026-08-21.
+**Notes:** LLM7.io rotates its catalog frequently, so the model list changes between checks. Its docs no longer describe a free tier or publish rate limits, and the [model catalog](https://api.llm7.io/v1/models) lists per-token prices for `turbo` models, which apply to keys from dash.llm7.io. Requests with no key still answer on the `turbo` models: confirmed by live request on 2026-11-19 and checked daily since.
 
 **Get a key:** https://token.llm7.io (optional: free models work without a key)
 
@@ -245,10 +295,9 @@ API gateway with a free tier. Anonymous access needs no key and reaches the `tur
 
 | Model ID | Context | Modality | Rate limit |
 | --- | --- | --- | --- |
-| `gpt-oss:20b` | 128K | Text | 60 RPM, 250 req/hr (free token) |
-| `mistral-Nemo-Instruct-2407` | 128K | Text | 60 RPM, 250 req/hr (free token) |
-| `nemotron-3-nano:30b` | 1M | Text (reasoning) | 60 RPM, 250 req/hr (free token) |
-| `codestral-latest` | 32K | Text | 60 RPM, 250 req/hr (free token) |
+| `gpt-oss:20b` | 128K | Text | Not published |
+| `mistral-Nemo-Instruct-2407` | 128K | Text | Not published |
+| `codestral-latest` | 32K | Text | Not published |
 
 ### Environment variable
 
@@ -341,6 +390,8 @@ curl -s https://api-inference.modelscope.cn/v1/chat/completions \
 
 Free with NVIDIA Developer Program membership. 100+ models. Rate-limited per model.
 
+**Notes:** NVIDIA does not publish a public RPM/RPD table for hosted NIM endpoints. The official FAQ says the rate of requests varies per model and may vary with the number of concurrent users, and that you should check your account at build.nvidia.com ([NIM FAQ](https://forums.developer.nvidia.com/t/nvidia-nim-faq/300317)). Hosted endpoints are for prototyping, research, development, and testing; production use requires an NVIDIA AI Enterprise license.
+
 **Get a key:** https://build.nvidia.com/explore/discover
 
 **OpenAI-compatible base URL:** `https://integrate.api.nvidia.com/v1`
@@ -349,10 +400,8 @@ Free with NVIDIA Developer Program membership. 100+ models. Rate-limited per mod
 
 | Model ID | Context | Modality | Rate limit |
 | --- | --- | --- | --- |
-| `google/gemma-4-31b-it` | 262K | Text + Image + Video | 40 RPM, 10,000 RPD |
-| `nvidia/nemotron-3-ultra-550b-a55b` | 1M | Text | 40 RPM, 10,000 RPD |
-| `openai/gpt-oss-20b` | 131K | Text | 40 RPM, 10,000 RPD |
-| + 92 more models | Varies | Text, Image, Video, Speech, Embeddings | 40 RPM, 10,000 RPD |
+| `nvidia/nemotron-3-ultra-550b-a55b` | 1M | Text | — |
+| + 92 more models | Varies | Text, Image, Video, Speech, Embeddings | — |
 
 ### Environment variable
 
@@ -372,7 +421,7 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="google/gemma-4-31b-it",
+    model="nvidia/nemotron-3-ultra-550b-a55b",
     messages=[{"role": "user", "content": "Say hello in one sentence."}],
 )
 print(response.choices[0].message.content)
@@ -384,7 +433,7 @@ print(response.choices[0].message.content)
 curl -s https://integrate.api.nvidia.com/v1/chat/completions \
   -H "Authorization: Bearer $NVIDIA_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"model": "google/gemma-4-31b-it", "messages": [{"role": "user", "content": "Say hello"}]}'
+  -d '{"model": "nvidia/nemotron-3-ultra-550b-a55b", "messages": [{"role": "user", "content": "Say hello"}]}'
 ```
 
 ---
@@ -403,15 +452,11 @@ curl -s https://integrate.api.nvidia.com/v1/chat/completions \
 
 | Model ID | Context | Modality | Rate limit |
 | --- | --- | --- | --- |
-| `cohere/north-mini-code:free` | 256K | Text (code) | 20 RPM, 50 RPD |
 | `google/gemma-4-26b-a4b-it:free` | 262K | Text + Image + Video | 20 RPM, 50 RPD |
 | `google/gemma-4-31b-it:free` | 262K | Text + Image + Video | 20 RPM, 50 RPD |
-| `dots-studio/dots-3-note-preview:free` | 512K | Text + Image | 20 RPM, 50 RPD |
-| `liquid/lfm-2.5-2.6b:free` | 64K | Text | 20 RPM, 50 RPD |
 | `nvidia/nemotron-3.5-lightning:free` | 1M | Text | 20 RPM, 50 RPD |
 | `nvidia/nemotron-3-ultra-550b-a55b:free` | 1M | Text | 20 RPM, 50 RPD |
 | `recursive/flint-v1.0:free` | 262K | Text | 20 RPM, 50 RPD |
-| `xingchen-agi/xing4.0-29b-a4b:free` | 262K | Text | 20 RPM, 50 RPD |
 | `nvidia/nemotron-3.5-super-vl:free` | 1M | Text + Image + Video | 20 RPM, 50 RPD |
 | `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` | 256K | Text + Image + Audio + Video | 20 RPM, 50 RPD |
 
@@ -433,7 +478,7 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="cohere/north-mini-code:free",
+    model="google/gemma-4-26b-a4b-it:free",
     messages=[{"role": "user", "content": "Say hello in one sentence."}],
 )
 print(response.choices[0].message.content)
@@ -445,7 +490,7 @@ print(response.choices[0].message.content)
 curl -s https://openrouter.ai/api/v1/chat/completions \
   -H "Authorization: Bearer $OPENROUTER_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"model": "cohere/north-mini-code:free", "messages": [{"role": "user", "content": "Say hello"}]}'
+  -d '{"model": "google/gemma-4-26b-a4b-it:free", "messages": [{"role": "user", "content": "Say hello"}]}'
 ```
 
 ---
@@ -506,6 +551,61 @@ With a key, the OpenAI SDK works as for any other provider.
 curl -s https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model": "Qwen3.5-397B-A17B", "messages": [{"role": "user", "content": "Say hello"}]}'
+```
+
+---
+
+## Runcrate 🇺🇸
+
+Free usage on five open models with a GitHub sign-in, no credit card required (the no-card free usage applies to GitHub sign-ins only; a Google sign-up needs a card on file). One allowance per GitHub account at least 30 days old, limited per week (resets every Monday).
+
+**Notes:** Runcrate's free usage is the workspace's: every key and member of the workspace shares it. It is counted by the week, which resets every Monday, and free requests stop until it resets when it runs out. The API keys page shows how much is used and when it resets. The no-card free usage applies to GitHub sign-ins only; with a Google sign-up a card on file is needed to use free models. Past the free usage, requests stop unless the workspace has added credit. Details on the [free inference page](https://www.runcrate.ai/inference/free).
+
+**Get a key:** https://www.runcrate.ai/dashboard/api-keys
+
+**OpenAI-compatible base URL:** `https://api.runcrate.ai/v1`
+
+### Models
+
+| Model ID | Context | Modality | Rate limit |
+| --- | --- | --- | --- |
+| `deepseek-ai/DeepSeek-V4.1-Flash` | 1M | Text + Image | Weekly allowance (shared) |
+| `zai-org/GLM-5.3-Flash` | 1M | Text + Image | Weekly allowance (shared) |
+| `zai-org/GLM-5.3` | 1M | Text (reasoning) | Weekly allowance (shared) |
+| `Qwen/Qwen3.8-Flash` | 1M | Text (reasoning) | Weekly allowance (shared) |
+| `openai/gpt-oss-120b` | 131K | Text (reasoning) | Weekly allowance (shared) |
+
+### Environment variable
+
+```bash
+export RUNCRATE_API_KEY="your-key-here"
+```
+
+### Usage example
+
+```python
+import os
+from openai import OpenAI
+
+client = OpenAI(
+    api_key=os.environ["RUNCRATE_API_KEY"],
+    base_url="https://api.runcrate.ai/v1",
+)
+
+response = client.chat.completions.create(
+    model="deepseek-ai/DeepSeek-V4.1-Flash",
+    messages=[{"role": "user", "content": "Say hello in one sentence."}],
+)
+print(response.choices[0].message.content)
+```
+
+### Quick test
+
+```bash
+curl -s https://api.runcrate.ai/v1/chat/completions \
+  -H "Authorization: Bearer $RUNCRATE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "deepseek-ai/DeepSeek-V4.1-Flash", "messages": [{"role": "user", "content": "Say hello"}]}'
 ```
 
 ---

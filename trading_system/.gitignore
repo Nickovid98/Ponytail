@@ -7,3 +7,6 @@ data/
 *.db-wal
 __pycache__/
 *.log
+# Salidas de las skills de tradermonty si se lanzan sin --output-dir / --cache-dir
+reports/
+.crypto_regime_cache/

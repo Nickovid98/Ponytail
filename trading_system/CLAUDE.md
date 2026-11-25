@@ -120,4 +120,6 @@ Motor y app solo se hablan por la tabla `kv`. Órdenes de la app: `ctl:kill`, `c
   dependencias que nadie pidió; las simplificaciones se marcan con `ponytail:` y dicen su techo.
 - Informa con lo que hiciste, lo que comprobaste y lo que no pudiste comprobar.
 - Skills de `.claude/skills/` que sirven aquí: `trader-entry` y `trader-exit` (de ahí salen las reglas de
-  `orb_agent.py`), `session-metrics` (coste de la sesión) y `claude-docs-consultant`. Las de Strix necesitan su CLI.
+  `orb_agent.py`), `backtest-expert` y `residual-edge-analyzer` (puntuar un examen y separar ventaja de mercado),
+  `session-metrics` (coste de la sesión) y `claude-docs-consultant`. Origen, licencia y requisitos de cada una en
+  `.claude/skills/README.md`. Las de Strix necesitan su CLI.

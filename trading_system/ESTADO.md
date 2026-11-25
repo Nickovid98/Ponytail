@@ -477,6 +477,11 @@ Comprobado en Windows, en el PC del usuario (16-11, sesión de Claude Code de es
   acciones quedaron sin vigilar unas 3 horas. Al volver, el motor solo miraba los últimos 10 minutos de precios;
   ahora revisa desde la apertura de cada operación, y al reiniciarlo encontró un objetivo (GOOGL, +365) y un stop
   (MSFT, −200) tocados durante el apagón. Ahora se lanza como un doble clic, independiente de la sesión.
+  - El 23 y el 24-11 volvió a apagarse dos veces. Claude había abierto `Iniciar cuenta de fondeo.bat` con
+    `Start-Process cmd`, y la ventana seguía colgando de la sesión de Claude.
+  - Desde el 24-11 Claude la abre con `explorer.exe "…\Iniciar cuenta de fondeo.bat"`. La cadena queda
+    explorer → cmd → app → motor, la misma de un doble clic, y ya no depende de la sesión.
+  - Sigue haciendo falta dejar abierta esa ventana negra y el ordenador encendido.
 - Dos rondas de revisión con críticos independientes (diseño y código); lo que encontraron está arreglado o
   anotado como límite (`ponytail:` y "Lo que no modela" en el `README.md`). De la segunda ronda solo terminó el
   ángulo de riesgo (el límite de uso cortó los de datos y sesiones, regresiones y pruebas); sus 6 hallazgos están
@@ -597,3 +602,13 @@ del usuario.
 17. **24-11, segunda ronda.** "Sí, otra ronda". H5 (resultados que se retrasan), H6 (avisos de mala noticia en la
     SEC) y H7 (ventas en racimo de directivos), registradas antes y revisadas por críticos independientes (una
     enmienda a H5). Las tres, descartadas en el entrenamiento.
+18. **24-11, motor y skills.** "vuelve a activarlo, si encuentras nuevas skills en github agrégalas y si encuentras
+    más información también".
+    - App y motor de la cuenta de fondeo encendidos de nuevo, esta vez con `explorer.exe` para que no dependan de
+      la sesión de Claude.
+    - Seis skills nuevas, revisadas antes por críticos independientes: `backtest-expert`, `residual-edge-analyzer`,
+      `crypto-regime-analyzer` y `market-breadth-analyzer` (de tradermonty/claude-trading-skills), y
+      `catalyst-calendar` y `earnings-preview` (del plugin oficial de Anthropic para finanzas).
+    - Cuatro actualizadas: `free-llm-apis`, `session-metrics`, `managed-pentesting-with-strix` y `design-is`.
+    - Lo que no se instaló y por qué, en `.claude/skills/README.md`. Sus programas no se han ejecutado en el PC: el
+      control de seguridad de Claude Code no lo dejó sin la aprobación del usuario.
