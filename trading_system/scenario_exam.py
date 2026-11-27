@@ -185,7 +185,7 @@ async def main() -> None:
         out["stocks"] = {"bets": bets, "result": report(bets, "Acciones (Yahoo, 60 días: no basta para aprobar)")}
     else:
         bets = []
-        for s in [s for s in config.SYMBOLS if "/" in s]:
+        for s in [s for s in config.SYMBOLS if "/" in s and not risk.is_fx(s)]:
             bets += crypto_bets(s, await crypto_bars(s, a.days), a.days)
             print(f"  {s}: {sum(b['symbol'] == s for b in bets)} decisiones simuladas", flush=True)
         out["crypto"] = {"bets": bets, "result": report(bets, f"Cripto ({config.EXCHANGE_ID}, {a.days} días)")}

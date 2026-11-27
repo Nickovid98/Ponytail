@@ -6,6 +6,9 @@
 - State Street (SSGA): las acciones de sus fondos del S&P 500 (SPY), 400 (MDY) y 600 (SPSM), con fecha de hoy.
 - Reserva Federal: reuniones del FOMC. Oficina de Estadísticas Laborales (BLS): IPC y empleo.
 - Yahoo: precios diarios desde 2009, ajustados por splits y dividendos, y velas de 1 hora de los últimos 730 días.
+- Políticos: lo que declaran congresistas y senadores (STOCK Act), del archivo abierto de Kadoa, sacado de las páginas
+  de la Cámara y el Senado. Grandes inversores: los 13F de la SEC de 26 gestores conocidos (Buffett, Ackman, Burry...).
+  Para traducir el CUSIP de cada acción a su ticker: los fondos de State Street y las entregas fallidas de la SEC.
 """
 import datetime as dt
 import io
@@ -248,6 +251,240 @@ def hourly(ticker: str, days: float = 1) -> pd.DataFrame:
                       index=pd.to_datetime(r["timestamp"], unit="s", utc=True).tz_convert(NY)).dropna()
     df = df[~df.index.duplicated(keep="last")]
     return _save(df.astype("float64"), path)
+
+
+# --- Lo que compran los políticos y los grandes inversores -----------------------------------------------------
+
+# Operaciones que congresistas y senadores declaran por la ley STOCK Act, recopiladas de las páginas oficiales de la
+# Cámara y el Senado por kadoa-org/congress-trading-monitor (licencia MIT, se renueva cada día). El laboratorio usa
+# una versión fija (la del 25-11-2026) para que sus cifras se puedan repetir; la app lee la del día.
+# ponytail: el archivo no trae a los senadores que dejaron el cargo antes de 2025 ni a los congresistas que
+# declaraban en papel, y antes de 2019 tiene menos de la mitad de los informes de la Cámara. Techo: lo que se mida
+# con él vale para los que siguen en el cargo (ESTADO.md, "Tercera ronda").
+KADOA = "https://raw.githubusercontent.com/kadoa-org/congress-trading-monitor/{}/public/data/"
+KADOA_PIN = "1d6be68f79ea6a1482e41f186ee44717e3500de6"
+CONGRESS_COLS = ["filer", "name", "branch", "chamber", "party", "state", "traded", "filed", "ticker", "asset",
+                 "asset_type", "kind", "owner", "usd_low", "usd_high", "doc"]
+
+
+def _congress_rows(filer: dict, trades: list[dict]) -> list[dict]:
+    return [{"filer": filer.get("id"), "name": filer.get("full_name") or t.get("filer_name"),
+             "branch": filer.get("branch") or t.get("branch"), "chamber": filer.get("chamber") or t.get("chamber"),
+             "party": filer.get("party") or t.get("party"), "state": filer.get("state") or t.get("state"),
+             "traded": t.get("transaction_date"), "filed": t.get("filing_date"),
+             "ticker": (t.get("ticker") or "").strip().upper(), "asset": t.get("asset_name") or "",
+             "asset_type": t.get("asset_type") or "", "kind": t.get("transaction_type") or "",
+             "owner": t.get("owner") or "", "usd_low": t.get("amount_range_low"),
+             "usd_high": t.get("amount_range_high"), "doc": t.get("doc_url") or ""} for t in trades]
+
+
+def _congress_frame(rows: list[dict]) -> pd.DataFrame:
+    df = pd.DataFrame(rows, columns=CONGRESS_COLS)
+    for c in ("traded", "filed"):
+        df[c] = pd.to_datetime(df[c], errors="coerce")
+    for c in ("usd_low", "usd_high"):
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df.dropna(subset=["filed"]).reset_index(drop=True)
+
+
+def congress(rev: str = KADOA_PIN) -> pd.DataFrame:
+    """Todas las operaciones declaradas por los 373 miembros del Congreso de esa versión del archivo: quién (cámara,
+    partido y estado), fecha de la operación y de la declaración (la que la hace pública), ticker, activo, tipo
+    (Purchase, Sale (Full), Sale (Partial) o Exchange), titular (él, cónyuge, conjunta o hijos) e importe (un rango).
+    Una versión fija no cambia: se guarda para siempre."""
+    path = DIR / "congress" / f"{rev[:12]}.parquet"
+    if path.exists():
+        return pd.read_parquet(path)
+    base, rows = KADOA.format(rev), []
+    for f in json.loads(fetch(base + "filers.json")):
+        if f.get("branch") == "congress":
+            rows += _congress_rows(f, json.loads(fetch(base + f"filer/{f['id']}.json"))["trades"])
+    return _save(_congress_frame(rows), path)
+
+
+def congress_latest(days: float = 1) -> pd.DataFrame:
+    """Las 5.000 últimas operaciones declaradas, del Congreso y de los altos cargos del Gobierno, en la versión del día."""
+    path = DIR / "congress" / "latest.parquet"
+    if _fresh(path, days):
+        return pd.read_parquet(path)
+    base = KADOA.format("main")
+    filers = {f["id"]: f for f in json.loads(fetch(base + "filers.json"))}
+    rows = [r for t in json.loads(fetch(base + "trades.json"))
+            for r in _congress_rows(filers.get(t.get("filer_id")) or {"id": t.get("filer_id")}, [t])]
+    return _save(_congress_frame(rows), path)
+
+
+# Los 13F: cada trimestre, quien gestiona más de 100 millones en acciones de EE. UU. declara en la SEC lo que tenía
+# al cierre del trimestre, como muy tarde 45 días después. Gestores conocidos y las CIK con las que presentan,
+# también sus predecesoras y sucesoras, comprobadas en EDGAR el 26-11-2026 (ESTADO.md, "Tercera ronda").
+MANAGERS = {
+    "Berkshire Hathaway (Warren Buffett)": (1067983,),
+    "Pershing Square (Bill Ackman)": (1336528, 2026053),
+    "Scion (Michael Burry)": (1649339,),
+    "Appaloosa (David Tepper)": (1006438, 1656456),
+    "Baupost (Seth Klarman)": (1061768,),
+    "Greenlight (David Einhorn)": (1079114, 1489933),
+    "Third Point (Dan Loeb)": (1040273,),
+    "Carl Icahn": (921669,),
+    "Duquesne (Stanley Druckenmiller)": (1536411,),
+    "Soros Fund Management (George Soros)": (1029160,),
+    "Tiger Global (Chase Coleman)": (1167483,),
+    "Lone Pine (Stephen Mandel)": (1061165,),
+    "Viking Global (Andreas Halvorsen)": (1103804,),
+    "Coatue (Philippe Laffont)": (1135730,),
+    "Elliott (Paul Singer)": (1048445, 1791786),
+    "Akre Capital (Chuck Akre)": (1112520,),
+    "Himalaya (Li Lu)": (1709323,),
+    "ValueAct (Jeff Ubben)": (1418814,),
+    "Trian (Nelson Peltz)": (1345471,),
+    "Glenview (Larry Robbins)": (1138995,),
+    "Maverick (Lee Ainslie)": (934639,),
+    "Fairholme (Bruce Berkowitz)": (1056831,),
+    "Gotham (Joel Greenblatt)": (1510387,),
+    "Oaktree (Howard Marks)": (949509,),
+    "Bridgewater (Ray Dalio)": (1350694,),
+    "Renaissance Technologies (Jim Simons)": (1037389,),
+}
+F13_FROM = "2013-05-20"  # desde ese día los 13F son XML; antes, texto libre
+F13_COLS = ["cusip", "issuer", "title", "shares", "value"]
+
+
+def _local(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _xml_rows(data: bytes, row: str) -> list[dict[str, str]]:
+    """Cada elemento `row` de un XML como {etiqueta: texto} de todo lo que lleva dentro, sin espacios de nombres."""
+    return [{_local(x.tag): (x.text or "").strip() for x in el.iter()}
+            for el in ET.fromstring(data).iter() if _local(el.tag) == row]
+
+
+def _number(text: str) -> float:
+    return float(re.sub(r"[^\d.]", "", text or "") or 0)
+
+
+def filing13f(cik: int, accession: str, accepted: pd.Timestamp, form: str) -> pd.DataFrame:
+    """Acciones de un 13F (una fila por CUSIP): acciones y valor en USD. Fuera las opciones (putCall) y los bonos
+    (PRN). Hasta el 03-01-2023 el valor venía en miles de USD. De las enmiendas solo cuentan las que añaden
+    posiciones ("NEW HOLDINGS", las que el gestor pidió mantener en secreto); una corrección ("RESTATEMENT") llega
+    tarde y no se usa: lo público en su momento era el original."""
+    base = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession.replace('-', '')}/"
+    names = [i["name"] for i in json.loads(fetch(base + "index.json", "sec"))["directory"]["item"]
+             if i["name"].lower().endswith(".xml")]
+    primary = next((n for n in names if n.lower() == "primary_doc.xml"), None)
+    table = next((n for n in names if n != primary), None)
+    empty = pd.DataFrame(columns=F13_COLS)
+    if form != "13F-HR":
+        kind = next((r.get("amendmentType", "") for r in _xml_rows(fetch(base + primary, "sec"), "amendmentInfo")), "") \
+            if primary else ""
+        if "NEW HOLDINGS" not in kind.upper():
+            return empty
+    if table is None:
+        return empty
+    scale = 1.0 if accepted >= pd.Timestamp("2023-01-03", tz="UTC") else 1000.0
+    rows = [{"cusip": r.get("cusip", "").upper(), "issuer": r.get("nameOfIssuer", ""), "title": r.get("titleOfClass", ""),
+             "shares": _number(r.get("sshPrnamt")), "value": _number(r.get("value")) * scale}
+            for r in _xml_rows(fetch(base + table, "sec"), "infoTable")
+            if not r.get("putCall") and r.get("sshPrnamtType", "SH").upper() == "SH"]
+    if not rows:
+        return empty
+    return pd.DataFrame(rows).groupby("cusip", as_index=False).agg(
+        issuer=("issuer", "first"), title=("title", "first"), shares=("shares", "sum"), value=("value", "sum"))
+
+
+def holdings13f(cik: int, days: float = 7) -> pd.DataFrame:
+    """Las posiciones de cada 13F-HR de un gestor desde que son XML, y las de sus enmiendas que añaden posiciones:
+    número de presentación, aceptación (UTC: desde ese momento es público), periodo, si es enmienda, CUSIP, emisor,
+    clase, acciones y valor en USD. Cada 13F se guarda para siempre (no cambia); la lista se renueva cada `days` días."""
+    folder = DIR / "13f" / str(cik)
+    listing = folder / "filings.parquet"
+    if _fresh(listing, days):
+        subs = pd.read_parquet(listing)
+    else:
+        j = json.loads(fetch(f"https://data.sec.gov/submissions/CIK{cik:010d}.json", "sec"))
+        parts = [j["filings"]["recent"]] + [json.loads(fetch("https://data.sec.gov/submissions/" + f["name"], "sec"))
+                                            for f in j["filings"].get("files", []) if f.get("filingTo", "9999") >= F13_FROM]
+        cols = ["accessionNumber", "acceptanceDateTime", "reportDate", "form"]
+        subs = pd.concat([pd.DataFrame({c: p.get(c, []) for c in cols}) for p in parts], ignore_index=True)
+        subs = subs[subs.form.isin(["13F-HR", "13F-HR/A"])].copy()
+        subs["accepted"] = pd.to_datetime(subs.acceptanceDateTime, utc=True, errors="coerce")
+        subs = subs[subs.accepted >= pd.Timestamp(F13_FROM, tz="UTC")].drop(columns="acceptanceDateTime")
+        subs = _save(subs.drop_duplicates("accessionNumber").reset_index(drop=True), listing)
+    out = []
+    for acc, accepted, period, form in zip(subs.accessionNumber, subs.accepted, subs.reportDate, subs.form):
+        path = folder / f"{acc}.parquet"
+        df = pd.read_parquet(path) if path.exists() else _save(filing13f(cik, acc, accepted, form), path)
+        out.append(df.assign(accession=acc, accepted=accepted, period=pd.to_datetime(period, errors="coerce"),
+                             amendment=form != "13F-HR"))
+    cols = F13_COLS + ["accession", "accepted", "period", "amendment"]
+    return pd.concat(out, ignore_index=True)[cols] if out else pd.DataFrame(columns=cols)
+
+
+def cusips(days: float = 30) -> dict[str, str]:
+    """CUSIP → ticker (formato de Yahoo) de las acciones de hoy del S&P 1500, según los fondos de State Street."""
+    path = DIR / "cusips.json"
+    if not _fresh(path, days):
+        out = {}
+        for fund in FUNDS.values():
+            rows = _xlsx_rows(fetch(SSGA.format(fund)))
+            head = next(i for i, r in enumerate(rows) if "Ticker" in r.values())
+            col = {name: letter for letter, name in rows[head].items()}
+            for r in rows[head + 1:]:
+                ticker, cusip = r.get(col["Ticker"], ""), r.get(col.get("Identifier", "?"), "").upper()
+                if re.fullmatch(r"[A-Z]{1,5}(\.[A-Z])?", ticker) and re.fullmatch(r"[0-9A-Z]{9}", cusip):
+                    out[cusip] = ticker.replace(".", "-")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(out))
+    return json.loads(path.read_text())
+
+
+FTD_PAGE = "https://www.sec.gov/data-research/sec-markets-data/fails-deliver-data"
+
+
+def ftd_links(days: float = 30) -> dict[str, str]:
+    """AAAAMMa / AAAAMMb (primera o segunda quincena) → dirección del archivo de entregas fallidas de la SEC."""
+    path = DIR / "ftd" / "links.json"
+    if not _fresh(path, days):
+        html = fetch(FTD_PAGE, "sec").decode("utf-8", "replace")
+        found = {m.group(2): "https://www.sec.gov" + m.group(1)
+                 for m in re.finditer(r'href="(/files/[^"]*cnsfails(\d{6}[ab])\.zip)"', html)}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(found))
+    return json.loads(path.read_text())
+
+
+def ftd_symbols(month: str) -> pd.DataFrame:
+    """Parejas CUSIP-símbolo de la primera quincena de `month` (AAAAMM) en las entregas fallidas de la SEC: dan el
+    símbolo que tenía cada CUSIP en esa fecha, también el de empresas que después cambiaron de nombre o de ticker."""
+    path = DIR / "ftd" / f"{month}.parquet"
+    if path.exists():
+        return pd.read_parquet(path)
+    url = ftd_links().get(month + "a")
+    if url is None:
+        raise FileNotFoundError(month)
+    z = zipfile.ZipFile(io.BytesIO(fetch(url, "sec")))
+    df = pd.read_csv(z.open(z.namelist()[0]), sep="|", dtype=str, quoting=3, encoding_errors="replace",
+                     on_bad_lines="skip")
+    df = df.rename(columns=lambda c: c.strip().upper())[["CUSIP", "SYMBOL"]].dropna()
+    df = df[df.CUSIP.str.fullmatch(r"[0-9A-Z]{9}") & df.SYMBOL.str.fullmatch(r"[A-Z0-9.\-]{1,8}")]
+    return _save(df.drop_duplicates().rename(columns=str.lower).reset_index(drop=True), path)
+
+
+def states(cik_list: list[int], days: float = 365) -> dict[int, str]:
+    """Estado de EE. UU. (o país) de la sede de cada empresa, según la dirección de negocio de su ficha en la SEC."""
+    path = DIR / "states.json"
+    known = json.loads(path.read_text()) if _fresh(path, days) else {}
+    missing = [c for c in cik_list if str(c) not in known]
+    for i, cik in enumerate(missing):
+        try:
+            j = json.loads(fetch(f"https://data.sec.gov/submissions/CIK{cik:010d}.json", "sec"))
+            known[str(cik)] = ((j.get("addresses") or {}).get("business") or {}).get("stateOrCountry") or ""
+        except FileNotFoundError:
+            known[str(cik)] = ""
+        if i % 100 == 99 or i == len(missing) - 1:  # cada 100: un corte de red no hace repetir todo
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(known))
+    return {int(k): v for k, v in known.items()}
 
 
 # --- Calendario oficial -----------------------------------------------------------------------------------------

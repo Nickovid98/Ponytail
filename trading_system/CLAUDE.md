@@ -2,7 +2,8 @@
 
 Mesa de trading multi-agente con app local: seis bots analizan, un jefe determinista decide y ejecuta, y
 `dashboard.py` lo enseña y lo controla. Opera cripto por CCXT y futuros de Topstep (`BROKER=topstepx`); las
-acciones de EE. UU. solo en simulación, con precios de Yahoo (un símbolo sin "/" es una acción). La cuenta de
+acciones de EE. UU. y las divisas contra el dólar (EUR/USD, JPY/USD...) solo en simulación, con precios de Yahoo
+(un símbolo sin "/" es una acción). La cuenta de
 fondeo simulada (cripto y acciones, 50.000) se abre con `Iniciar cuenta de fondeo.bat`, que fija sus reglas y su
 propia base de datos. El usuario no es programador y escribe en español: respóndele en español llano.
 
@@ -44,7 +45,7 @@ consulta solo la sección que toque (`grep -n '^#' README.md`).
 
 `selfcheck OK` es obligatorio antes de cada commit; la pasada parcial sirve para iterar y no lo sustituye.
 Comprobaciones: `cache risk agents boss_decision lifecycle evolution tokens_and_alerts ccxt_broker macro optimizer
-app orb backtest alpaca topstepx funded scenarios public prop`. Solo `backtest` es lenta (50 s).
+app orb backtest alpaca topstepx funded fx scenarios public prop`. Solo `backtest` es lenta (50 s).
 
 ## Mapa (salta con `grep -n "def nombre"`, no leas archivos enteros)
 
@@ -59,18 +60,18 @@ app orb backtest alpaca topstepx funded scenarios public prop`. Solo `backtest` 
 | `agents/boss_agent.py` | decisión ponderada, límites, kill switch, ejecución y relevo de la cuenta de fondeo | `decide`, `tick`, `_maybe_trade`, `_fund`, `_floor`, `_relevo`, `_flatten` |
 | `agents/evolution_manager.py` | muerte y renacimiento de bots; post-mortem con Claude | `on_trade_closed`, `_kill`, `_rebirth` |
 | `optimizer.py` | recompensas en R, confianza del jefe en cada bot, ajustes de la app | `reward`, `new_weights`, `TUNABLE`, `apply_params`, `run` |
-| `utils/risk_manager.py` | stop, tamaño, costes por activo, límites diarios, sesión de Topstep y de Nueva York | `build_plan`, `costs`, `is_stock`, `nyse_session`, `nyse_open_since`, `check_limits` |
+| `utils/risk_manager.py` | stop, tamaño, costes por activo, límites diarios, sesión de Topstep, de Nueva York y de las divisas | `build_plan`, `costs`, `is_stock`, `is_fx`, `on_yahoo`, `nyse_session`, `fx_session`, `fx_quoted`, `check_limits` |
 | `utils/exchange.py` | datos (CCXT, Alpaca; acciones por Yahoo), `PaperBroker`, `CcxtBroker` | `make_exchange`, `yahoo_chart`, `Market.ohlcv` |
 | `utils/topstepx.py` | cliente REST de ProjectX, datos y brokers de futuros | `TopstepClient`, `TopstepBroker.open`, `flatten_all` |
 | `utils/trade_logger.py` | operaciones, genealogía y bitácora (`events`) en SQLite | `log_close`, `log_event`, `events` |
 | `utils/db.py` | SQLite y el estado compartido `kv` | `get_state`, `set_state`, `del_state` |
 | `utils/token_budget.py` | tope diario de tokens y auditoría de cada llamada a Claude | `llm_allowed`, `record_llm` |
-| `backtest.py` | simulación vela a vela, cuenta fondeada por generaciones, examen fuera de muestra | `run`, `successor`, `fold`, `walk_forward`, `yahoo`, `export` |
+| `backtest.py` | simulación vela a vela, cuenta fondeada por generaciones (relevo con pruebas; `--rules`, solo reglas fijas), examen fuera de muestra | `run`, `successor`, `_evidence`, `fold`, `walk_forward`, `yahoo`, `export` |
 | `scenario_exam.py` | examen fuera de muestra del bot de escenarios (cripto 2 años por CCXT, acciones 60 días por Yahoo) | `crypto_bets`, `stock_bets`, `chosen`, `report` |
-| `utils/public_data.py` | datos públicos sin clave: SEC (resultados, formularios 4, tamaño), State Street, Reserva Federal, BLS, Yahoo | `universe`, `filings`, `earnings`, `insider`, `floats`, `daily`, `hourly`, `calendar` |
-| `event_lab.py` | laboratorio de H1-H7 con datos públicos (protocolo en `ESTADO.md`): `download`, `train`, `exam`, `holdout` (`--round 2` para H5-H7) | `Panel`, `clean`, `pit_groups`, `h1`-`h7`, `stats`, `h4_stats`, `passes` |
+| `utils/public_data.py` | datos públicos sin clave: SEC (resultados, formularios 4, tamaño, 13F, entregas fallidas), State Street, Reserva Federal, BLS, Yahoo, lo que declaran los políticos (Kadoa) | `universe`, `filings`, `earnings`, `insider`, `floats`, `daily`, `hourly`, `calendar`, `congress`, `holdings13f`, `MANAGERS`, `cusips`, `ftd_symbols` |
+| `event_lab.py` | laboratorio de H1-H9 con datos públicos (protocolo en `ESTADO.md`): `download`, `train`, `exam`, `holdout` (`--round 2` para H5-H7, `--round 3` para H8 políticos y H9 13F) | `Panel`, `clean`, `pit_groups`, `h1`-`h9`, `Names`, `congress_buys`, `fund_frames`, `stats`, `passes` |
 | `prop_plan.py` | el plan de pagar una cuenta de fondeo y cobrar rápido, con las reglas reales de 6 cuentas (verificadas el 25-11) y los días de un `backtest.py --save` | `FIRMS`, `attempt`, `odds` |
-| `dashboard.py` | la app (Streamlit): una función por pestaña | `control_room`, `bots_room`, `boss_room`, `lab`, `settings` |
+| `dashboard.py` | la app (Streamlit): una función por pestaña | `control_room`, `bots_room`, `boss_room`, `lab`, `watch_room` (políticos y fondos), `settings` |
 | `selfcheck.py` | la batería: una función `check_*` por área | |
 
 Motor y app solo se hablan por la tabla `kv`. Órdenes de la app: `ctl:kill`, `ctl:mode`, `ctl:params`,

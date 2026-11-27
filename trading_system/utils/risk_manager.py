@@ -26,6 +26,21 @@ def is_stock(symbol: str) -> bool:
     return config.BROKER == "ccxt" and bool(symbol) and "/" not in symbol
 
 
+def is_fx(symbol: str) -> bool:
+    """Divisa contra el dólar (EUR/USD, GBP/USD, JPY/USD...): precios de Yahoo, solo simulación."""
+    return config.BROKER == "ccxt" and bool(symbol) and symbol[:3] in config.FX_CODES and symbol[3:] == "/USD"
+
+
+def on_yahoo(symbol: str) -> bool:
+    """Acción o divisa: sus precios salen de Yahoo y opera con velas de 1 h (STOCK_TIMEFRAME)."""
+    return is_stock(symbol) or is_fx(symbol)
+
+
+def yahoo_symbol(symbol: str) -> str:
+    """Nombre en Yahoo: EUR/USD es EURUSD=X; una acción se llama igual."""
+    return symbol[:3] + "USD=X" if is_fx(symbol) else symbol
+
+
 def trading_day(now: dt.datetime | None = None) -> str:
     """Día operativo. Cripto: fecha UTC. Topstep: empieza a las 17:00 de Chicago del día anterior."""
     now = now or dt.datetime.now(dt.timezone.utc)
@@ -84,6 +99,45 @@ def nyse_session(now: dt.datetime | None = None) -> tuple[bool, bool]:
     return entries, closes - config.STOCK_FLAT_MIN * m <= t < closes
 
 
+def fx_hours(t: dt.datetime) -> tuple[dt.datetime, dt.datetime] | None:
+    """Apertura (domingo 17:00 de Nueva York) y cierre (viernes 17:00) de la semana de divisas en curso en `t`,
+    en hora de Nueva York, o None si es fin de semana y el mercado está cerrado."""
+    # ponytail: sin festivos. Techo: el 25-12 y el 1-1 apenas hay mercado y se operaría con precios quietos.
+    opens = (t - dt.timedelta(days=(t.weekday() + 1) % 7)).replace(hour=17, minute=0, second=0, microsecond=0)
+    if opens > t:  # domingo antes de las 17:00: cuenta la semana anterior, ya cerrada
+        opens -= dt.timedelta(days=7)
+    closes = opens + dt.timedelta(days=5)
+    return (opens, closes) if t < closes else None
+
+
+def fx_open_since(now: dt.datetime | None = None) -> float | None:
+    """Si el mercado de divisas está abierto, el momento (epoch) en que abrió esta semana; si está cerrado, None."""
+    h = fx_hours((now or dt.datetime.now(dt.timezone.utc)).astimezone(NEW_YORK))
+    return h[0].timestamp() if h else None
+
+
+def fx_quoted(now: dt.datetime | None = None) -> bool:
+    """¿Hay precios de divisas al día? Desde que Yahoo los da tras la apertura del domingo (FX_OPEN_WAIT_MIN) hasta
+    el cierre del viernes. Antes, el último precio es el del viernes y no sirve para cerrar nada."""
+    t = (now or dt.datetime.now(dt.timezone.utc)).astimezone(NEW_YORK)
+    h = fx_hours(t)
+    return bool(h) and t >= h[0] + dt.timedelta(minutes=config.FX_OPEN_WAIT_MIN)
+
+
+def fx_session(now: dt.datetime | None = None) -> tuple[bool, bool]:
+    """Divisas: (se permiten entradas nuevas, toca cerrar las abiertas). Se entra desde que Yahoo da precios (3 h
+    después de la apertura del domingo) hasta una hora antes del cierre del viernes, y todo se cierra en los últimos
+    5 minutos: nada pasa el fin de semana abierto. Lo que quedara abierto se cierra cuando vuelve a haber precios."""
+    t = (now or dt.datetime.now(dt.timezone.utc)).astimezone(NEW_YORK)
+    h = fx_hours(t)
+    if not h:
+        return False, False
+    opens, closes = h
+    m = dt.timedelta(minutes=1)
+    entries = opens + config.FX_OPEN_WAIT_MIN * m <= t < closes - config.FX_LAST_ENTRY_MIN * m
+    return entries, closes - config.FX_FLAT_MIN * m <= t < closes
+
+
 def atr(df: pd.DataFrame, n: int = 14) -> float:
     """Average True Range con suavizado de Wilder."""
     prev = df.close.shift()
@@ -92,9 +146,11 @@ def atr(df: pd.DataFrame, n: int = 14) -> float:
 
 
 def costs(symbol: str | None = None) -> tuple[float, float]:
-    """(comisión, deslizamiento) por lado en % del nocional: los de las acciones o los de cripto."""
+    """(comisión, deslizamiento) por lado en % del nocional: los de las acciones, las divisas o cripto."""
     if symbol and is_stock(symbol):
         return config.STOCK_FEE_PCT, config.STOCK_SLIPPAGE_PCT
+    if symbol and is_fx(symbol):
+        return config.FX_FEE_PCT, config.FX_SLIPPAGE_PCT
     return config.FEE_PCT, config.SLIPPAGE_PCT
 
 

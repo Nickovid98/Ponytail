@@ -1,7 +1,7 @@
 """Agente 3 · SMC Intradía: estructura (BOS/CHoCH), order blocks, FVG y liquidez."""
 import config
 from agents import Signal, neutral
-from utils.risk_manager import atr, is_stock
+from utils.risk_manager import atr, on_yahoo
 
 
 class SMCAgent:
@@ -12,7 +12,7 @@ class SMCAgent:
     k = 3  # velas a cada lado para confirmar un swing
 
     async def run(self, symbol, market) -> Signal:
-        tf = config.STOCK_TIMEFRAME if is_stock(symbol) else self.timeframe  # acciones: velas de 1 h
+        tf = config.STOCK_TIMEFRAME if on_yahoo(symbol) else self.timeframe  # acciones y divisas: velas de 1 h
         return self.analyze(symbol, await market.ohlcv(symbol, tf, self.limit), tf)
 
     @classmethod

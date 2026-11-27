@@ -93,6 +93,21 @@ STOCK_LAST_ENTRY_MIN = _f("STOCK_LAST_ENTRY_MIN", 30)  # sin entradas en la últ
 STOCK_FLAT_MIN = _f("STOCK_FLAT_MIN", 5)  # todo cerrado 5 minutos antes del cierre: nada pasa la noche abierto
 STOCKS = [s for s in SYMBOLS if BROKER == "ccxt" and "/" not in s]
 
+# --- Divisas contra el dólar (precios de Yahoo; solo simulación) -------------
+# EUR/USD, GBP/USD, AUD/USD, NZD/USD y, al revés que en la calle, JPY/USD, CAD/USD y CHF/USD (como los futuros
+# 6J, 6C y 6S de Chicago): así el resultado sale siempre en dólares. El mercado abre el domingo a las 17:00 de
+# Nueva York y cierra el viernes a las 17:00. Velas de 1 h para SMC, Wyckoff y el stop, como las acciones, y nada
+# pasa el fin de semana abierto. En Topstep el euro es el futuro M6E (o 6E) y se pone en SYMBOLS tal cual.
+FX_CODES = ("EUR", "GBP", "AUD", "NZD", "JPY", "CAD", "CHF")
+FX_FEE_PCT = _f("FX_FEE_PCT", 0.0035)  # comisión por lado, en % del nocional (3,5 USD por lote de 100.000)
+FX_SLIPPAGE_PCT = _f("FX_SLIPPAGE_PCT", 0.005)  # medio diferencial más deslizamiento, por lado (~0,5 pips)
+# Yahoo da el primer precio a las 00:00 de Londres del lunes: las 19:00 del domingo en Nueva York, o las 20:00 en
+# las semanas en que EE. UU. ya cambió de hora y Reino Unido no. Hasta entonces el último precio es el del viernes.
+FX_OPEN_WAIT_MIN = _f("FX_OPEN_WAIT_MIN", 180)
+FX_LAST_ENTRY_MIN = _f("FX_LAST_ENTRY_MIN", 60)  # sin entradas en la última hora antes del cierre del viernes
+FX_FLAT_MIN = _f("FX_FLAT_MIN", 5)  # todo cerrado 5 minutos antes del cierre del viernes
+FOREX = [s for s in SYMBOLS if BROKER == "ccxt" and s[:3] in FX_CODES and s[3:] == "/USD"]
+
 # --- Decisión --------------------------------------------------------------
 STRATEGY = _s("STRATEGY", "ensemble").lower()  # ensemble: los cinco agentes · orb: ruptura del rango de apertura
 if STRATEGY not in ("ensemble", "orb"):
@@ -157,6 +172,17 @@ if EXCHANGE_ID == "alpaca" and BROKER == "ccxt" and not PAPER_TRADING:
 if STOCKS and not PAPER_TRADING:
     raise SystemExit(f"Las acciones ({', '.join(STOCKS)}) solo se simulan (PAPER_TRADING=True): el motor lee sus precios\n"
                      "en Yahoo y no hay ningún broker de acciones conectado que pueda recibir órdenes.")
+if FOREX and not PAPER_TRADING:
+    raise SystemExit(f"Las divisas ({', '.join(FOREX)}) solo se simulan (PAPER_TRADING=True): el motor lee sus precios\n"
+                     "en Yahoo y no hay ningún broker de divisas conectado. En Topstep el euro es el futuro M6E o 6E.")
+_yahoo_names = [s for s in SYMBOLS if BROKER == "ccxt" and s.upper().endswith("=X")]
+if _yahoo_names:
+    raise SystemExit(f"{', '.join(_yahoo_names)} es el nombre de Yahoo: escribe el par con barra, como "
+                     f"{_yahoo_names[0][:3].upper()}/USD (el yen, JPY/USD).")
+_usd_first = [s for s in SYMBOLS if BROKER == "ccxt" and s[:4] == "USD/" and s[4:] in FX_CODES]
+if _usd_first:
+    raise SystemExit(f"Escribe {', '.join(s[4:] + '/USD' for s in _usd_first)} en vez de {', '.join(_usd_first)}: "
+                     "el par va contra el dólar,\ncomo el futuro de Chicago, para que el resultado salga en dólares.")
 
 if PROP_MAX_LOSS_USD < 0:
     raise SystemExit("PROP_MAX_LOSS_USD es lo que se puede perder bajo el mejor cierre diario: un importe positivo (o 0).")

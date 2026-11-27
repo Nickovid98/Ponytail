@@ -412,6 +412,209 @@ tradethepool.com, ftmo.com, hyrotrader.com y Kraken Prop), con un segundo reviso
   - `TexasCoding/project-x-py` (MIT) y la documentación oficial de ProjectX sirven para revisar `utils/topstepx.py`
     antes de usarlo de verdad; queda como pendiente si el usuario elige Topstep.
 
+## Relevo con pruebas, divisas y copiar a políticos y fondos (26-11, escrito antes de ver ningún resultado)
+
+Petición del usuario: "los bots van en perdidas muy grandes de ser necesario al llegar al limite de perdida de la
+cuenta de fondeo, que se inicien unos nuevos con todo el aprendizaje nuevo, que aprendan de los errores de los
+anteriores y que optimicen el sistema, deben poder acceder a lo que invierten los politicos de estados unidos y
+algunos millonarios o fondos, y ver si es buena idea o no, deben operar tambien con el euro vs dolar y todo eso".
+
+Son tres pruebas. Las tres se escriben aquí antes de mirar nada, y el código queda guardado en un commit antes de
+lanzarlas.
+
+### A. Relevo que aprende de todas las cuentas
+
+- **Lo que ya había.** Al perder la cuenta nace otra que hereda:
+  - los pesos de cada bot, calculados con todo el historial;
+  - los vetos (un activo en un sentido que no se opera);
+  - una corrección de UNA causa, con reglas fijas y por este orden: stop más ancho si los costes pasaban del 25 %
+    de lo arriesgado; umbral +0,10 si acertaba antes de costes; vetar el par activo/lado que más perdió; umbral
+    +0,05; o arriesgar un 25 % menos.
+- **Lo nuevo.**
+  - Los costes siguen yendo primero.
+  - Después se buscan pruebas en dos periodos: la cuenta perdida y todas las anteriores. En la primera muerte, las
+    dos mitades de la cuenta.
+  - Candidatas: vetar cada par activo/lado, o subir el umbral 0,05, 0,10 o 0,15 (hasta 0,75).
+  - Una candidata vale solo si en LOS DOS periodos habría quitado al menos 5 operaciones que, juntas, perdían. Gana
+    la que más habría ahorrado en el peor de los dos.
+  - Si ninguna vale, se usan las reglas fijas de antes. Así una mala racha de un solo periodo no se toma por una
+    lección.
+  - El motor en vivo usa la misma función (`backtest.successor`).
+- **Cómo se compara.** Las mismas simulaciones de cuenta fondeada que la tabla de "Ya probado", con el relevo
+  nuevo y con el de reglas fijas (`lineage={"learn": "rules"}`), sobre los mismos datos:
+  - acciones (las siete del usuario), un año;
+  - cripto (BTC y ETH de Binance, desde el PC), un año;
+  - divisas (prueba B), todo lo que da Yahoo.
+  - Las dos formas solo usan lo ya ocurrido en cada muerte: es una comparación limpia de dos procedimientos, sin
+    ajustar nada después.
+- **Criterio.** El relevo nuevo se queda si en las tres simulaciones pierde menos (o gana más) que el de reglas
+  fijas, sin perder más cuentas. Si no, se quita el código y se dice. Ninguna de las dos formas crea ventaja: la
+  tabla de "Ya probado" muestra que aprender reduce pérdidas porque enseña a operar menos.
+- **Enmienda del 26-11, antes de ver ningún resultado.** Una revisión independiente (3 revisores, cada uno
+  comprobando lo que encontraba) halló 28 fallos en las tres pruebas. En esta, cambia:
+  - **Las pruebas solo cuentan lo que la configuración de ahora todavía operaría.** Lo ya vetado o por debajo del
+    umbral actual no prueba nada. Sin esto, desde la segunda muerte subir el umbral se apoyaba en un solo periodo.
+  - **Lo que se quita tiene que perder de verdad en cada periodo**, con media negativa y t ≥ 2. Con datos de puro
+    azar, la versión anterior encontraba una "lección" en el 78 % de las primeras muertes.
+  - **Cada forma se lanza con su propio comando y el mismo día UTC** (`backtest.py ... --rules` para la de reglas
+    fijas). Así no se mezclan la evolución de los bots ni los datos, que se guardan por día.
+  - **Empate:** un mercado en el que las dos formas operan igual (sin cuentas perdidas, o con las mismas lecciones)
+    no cuenta y deciden los demás. Si ninguno tiene diferencias, no hay prueba y se quedan las reglas fijas.
+  - **Con el resultado se dan, de cada forma, las operaciones, el bruto y el neto por operación.** Si gana solo por
+    operar menos, se dice así.
+  - **Datos ya vistos:** el año de acciones y el de cripto ya se vieron con el relevo de reglas fijas (11 a 14-11).
+    Solo las divisas son datos nuevos.
+  - **El motor en vivo sigue con las reglas fijas** hasta que esta comparación decida.
+
+### B. Los bots en divisas
+
+- **Qué se activa.**
+  - EUR/USD, GBP/USD y JPY/USD (el yen al revés, como el futuro 6J de Chicago, para que el resultado salga en
+    dólares). Simulados con precios de Yahoo, sin volumen ni libro de órdenes.
+  - Horario: de domingo 17:00 a viernes 17:00 de Nueva York. Se entra desde 2 horas después de abrir (antes Yahoo
+    no da precios) hasta una hora antes del cierre del viernes. Todo se cierra 5 minutos antes: nada pasa el fin de
+    semana abierto.
+  - Velas de 1 hora para SMC, Wyckoff y el stop, como las acciones. Wyckoff no vota (sin volumen no puede leer
+    nada).
+  - Costes por lado: comisión del 0,0035 % (3,5 USD por lote de 100.000, como IC o Pepperstone) y 0,005 % de medio
+    diferencial y deslizamiento (unos 0,5 pips en el euro).
+  - Se activa en la cuenta de fondeo simulada pase lo que pase en la prueba, porque el usuario lo pidió; si
+    suspende, se dice.
+  - En Topstep el euro sería el futuro M6E o 6E (permitidos allí, 1 o 4,22 USD por ida y vuelta). Basta ponerlo en
+    `SYMBOLS`, pero no se ha probado contra el servicio real.
+- **La prueba.** Los bots tal cual, sin ajustar nada, en la cuenta fondeada simulada:
+  - 50.000 y 200 de riesgo por operación;
+  - límite diario de 1.000;
+  - cuenta perdida a 2.000 del mejor cierre, con relevo;
+  - velas de 1 hora de Yahoo (unos 2,8 años, desde febrero de 2024);
+  - `--evolution --lineage 2000 --flat`, como la de acciones.
+- **Aprueba si:** al menos 100 operaciones, resultado neto positivo, las dos mitades en positivo y ninguna cuenta
+  perdida. Todo el periodo es examen, porque no se elige nada.
+- **Enmienda del 26-11, antes de ver ningún resultado** (la misma revisión independiente):
+  - **El periodo.** La revisión creía que Yahoo solo da 2 años de velas de 1 hora. Pidiéndolas como las pide
+    `backtest.py` (`range=730d`, 730 días de mercado) llegan desde el 12-02-2024: unos 2,8 años. Se simulan los
+    últimos 950 días, para que los bots tengan 2 meses de calentamiento.
+  - **El riesgo.** Con el tope de apalancamiento de 2 veces, cada operación en divisas arriesga unos 50–100, no 200:
+    el stop a 1,5 veces el ATR de 1 hora queda a un 0,09 % y el tope deja 100.000 de nocional.
+  - **Wyckoff** vota neutral en divisas y cuenta en el denominador del jefe: no se abstiene del todo.
+  - **Arreglado antes de lanzar la prueba:**
+    - el yen se habría operado con el precio redondeado de la cabecera de Yahoo (hasta un 0,8 % de error, varias
+      veces el stop); ahora se usa el último cierre;
+    - se entra desde 3 horas después de la apertura del domingo, porque Yahoo no da precios hasta las 19:00 (o las
+      20:00) de Nueva York;
+    - lo que quedara abierto del fin de semana se cierra cuando ya hay precios de la semana nueva, no con el último
+      del viernes;
+    - en el backtest no se entra en la última hora del viernes, todo se cierra antes del fin de semana con o sin
+      reglas de fondeo, y un stop que salta con un hueco se ejecuta donde abre la vela, como en vivo. Esto último
+      vale también para las acciones y cambia un poco sus simulaciones;
+    - el bot Macro pide a Alpha Vantage las noticias de las divisas como divisas (`FOREX:EUR`), no como cripto;
+    - `EURUSD=X` en `SYMBOLS` se rechaza (pasaba por una acción);
+    - la lección "stop más ancho" de un relevo ensancha también, en vivo, el stop de las acciones y las divisas,
+      como ya hacía el backtest.
+
+### C. Tercera ronda del laboratorio: copiar a los políticos (H8) y a los grandes inversores (H9)
+
+- **Igual que en las rondas anteriores:**
+  - el S&P 1500 con el tamaño de cada empresa en cada fecha, la limpieza de precios y los costes;
+  - solo compras;
+  - entrada al cierre de la sesión siguiente al día en que el dato es público;
+  - una posición por acción a la vez;
+  - periodos: entrenamiento 2010–2017, examen 2018–2022 y reservado de 2023 a hoy, que se mira una sola vez.
+- **Datos, todos públicos y sin clave.**
+  - **Políticos:** las declaraciones de compra y venta de congresistas y senadores (ley STOCK Act). Vienen de
+    `kadoa-org/congress-trading-monitor` (MIT), sacadas de las páginas de la Cámara y el Senado, con una versión fija
+    (commit `1d6be68`, del 25-11-2026).
+    - Cuenta la fecha de la declaración, no la de la operación: hasta entonces nadie la ve. La mediana del retraso
+      es de 31 días.
+    - Hay datos desde 2014, así que el entrenamiento real es 2014–2017.
+  - **Grandes inversores:** los 13F de la SEC, en XML desde el 20-05-2013, de 26 gestores conocidos. Sus CIK se
+    comprobaron en EDGAR el 26-11-2026 y están en `utils/public_data.py` (`MANAGERS`).
+    - Buffett (Berkshire), Ackman, Burry, Tepper, Klarman, Einhorn, Loeb, Icahn, Druckenmiller, Soros, Tiger Global,
+      Lone Pine, Viking, Coatue, Elliott, Akre, Li Lu, ValueAct, Trian, Glenview, Maverick, Fairholme, Greenblatt,
+      Oaktree, Bridgewater y Renaissance.
+    - Cuenta el momento de aceptación de la SEC.
+    - Las posiciones que un gestor mantuvo en secreto y salieron después en una enmienda cuentan desde la enmienda.
+    - Las correcciones posteriores no se usan.
+  - **Para traducir cada CUSIP a su ticker:** primero el de hoy, de los fondos de State Street. Si no está, el
+    símbolo que tenía en esa fecha según las entregas fallidas de la SEC (un archivo por trimestre), que también
+    sigue los cambios de ticker (FB → META).
+  - **La sede de cada empresa (H8, variante de su estado):** la dirección de su ficha en la SEC.
+  - **El SPY** (S&P 500 ponderado por tamaño), de Yahoo.
+- **H8, copiar a los políticos.** Compras de acciones (sin opciones, bonos ni fondos). Si una operación sale en
+  varias declaraciones, cuenta la primera. Variantes:
+  - **todas las compras**, mantener 63 sesiones. Lo publicado espera entre −2 % y +1 % al año: Belmont y otros 2022,
+    Chen y Sacerdote 2026, y los fondos NANC y GOP, que copian al Congreso desde 2023 y van como el S&P 500;
+  - **las de los 12 cargos de dirección** mientras los tienen (presidente de la Cámara, líderes y "whips" de las dos
+    cámaras y presidentes de los grupos), mantener 250 sesiones. Wei y Zhou 2025 dan +10,6 % al año desde la
+    declaración, con muy pocos casos; Chen y Sacerdote, −4,4 %;
+  - **las de empresas con sede en el estado del político**, mantener 250 sesiones. Eggers y Hainmueller 2014 dan
+    0–3 % al año, medido con carteras y no desde la declaración.
+- **H9, copiar a los grandes inversores.** Variantes:
+  - **Berkshire:** acciones nuevas o que crecen al menos un 10 % (descontando los splits) frente a lo que se sabía
+    del trimestre anterior; mantener 252 sesiones. Martin y Puthenpurackal 2008 dan 6–11 % al año en 1976–2006,
+    antes de publicarse; Frazzini, Kabiller y Pedersen 2018 lo explican por sus factores;
+  - **consenso:** el día siguiente al plazo de 45 días, las acciones que al menos 3 gestores tienen entre sus 10
+    mayores posiciones; mantener 63 sesiones. Solo cuentan los gestores con 10 a 200 posiciones, como en la regla
+    de Goldman Sachs. Su fondo GVIP da −0,9 % al año frente al SPY desde 2016;
+  - **apuestas nuevas:** una acción entra entre las 10 mayores de un gestor sin estar en su 13F anterior; mantener
+    63 sesiones. Lo publicado espera entre −3 % y +2 % al año (el fondo GURU, −2,9 %).
+- **Elección:** en cada hipótesis, la variante con más t en el entrenamiento, con al menos 100 operaciones. Si no
+  llega a t = 2, la hipótesis se descarta sin examen.
+- **Aprueba el examen si cumple todo:**
+  - al menos 100 operaciones;
+  - t ≥ 3,0 frente a su grupo: son 9 hipótesis con las dos rondas anteriores, y Bonferroni pide 2,77;
+  - al menos 3 de los 5 años en positivo;
+  - también gana al SPY, con t ≥ 1,65 (copiar a estos inversores carga en las gigantes, y entre 2023 y 2026 el SPY
+    sacó más de 5 puntos al año a la media de sus acciones);
+  - sin las 3 acciones que más aportan, la media por operación sigue en positivo.
+- **Confirma en el reservado si:** al menos 100 operaciones, media positiva, t ≥ 1,65 y por encima del SPY.
+- **Sesgos conocidos, que se dirán con el resultado:**
+  - la lista de acciones es la de hoy;
+  - en el Senado solo están los que siguen en el cargo;
+  - la Cámara tiene menos de la mitad de los informes antes de 2019 y le faltan los que se declaraban en papel;
+  - el 73–80 % de las compras son de menos de 15.000 USD;
+  - más de la mitad son del cónyuge o de cuentas conjuntas;
+  - muchas de las operaciones famosas de Pelosi son opciones, y aquí no se copian;
+  - un 13F llega hasta 45 días tarde y no muestra lo que se mantiene en secreto;
+  - las empresas que ya no cotizan quedan fuera, y la sede es la de hoy.
+- **Qué se activa pase lo que pase:** en la app, las últimas declaraciones de los políticos y las últimas
+  posiciones de los gestores, para mirarlas. Un bot que vote con esto, solo si una hipótesis aprueba el examen y
+  confirma en el reservado.
+- **Enmienda del 26-11, antes de ver ningún resultado** (la misma revisión independiente). Cambia la medida; las
+  hipótesis, las variantes, los periodos y los criterios siguen igual:
+  - **Apuestas nuevas.** El código pedía gestores de 10 a 200 posiciones, como el consenso, y el texto de arriba no.
+    Se quita del código. Ahora también cuentan Ackman, Burry, Li Lu o Peltz, que tienen menos de 10.
+  - **El plazo del 13F** también salta los festivos federales (el día de los presidentes, en febrero), no solo los
+    fines de semana.
+  - **Consenso.** Si una acción sigue en el consenso en la revisión siguiente y su posición sigue abierta, se alarga
+    en vez de cerrarse. Antes, con 63 sesiones y revisiones cada 60–65, se saltaba un trimestre de cada dos.
+  - **Compras de políticos.**
+    - Fuera también las opciones, los bonos y las preferentes que llevan el código de acción ([ST]).
+    - Fuera las filas cuyo texto trae otro ticker: a veces se tomaba del nombre de la cuenta.
+    - Una operación redeclarada cuenta una vez, aunque cambie el titular o el importe.
+  - **Tickers que hoy son de otra empresa.** 12, comprobados a mano: WTW era Weight Watchers, BBT era BB&T, COHR era
+    Coherent... Antes de su fecha de cambio no se traducen por el símbolo. La lista está en `event_lab.py`
+    (`REUSED`); puede haber más casos, del orden del 1 % de las operaciones.
+  - **Berkshire y apuestas nuevas.** Una acción no es nueva si su emisor ya estaba con otro CUSIP (cambio de CUSIP u
+    otra clase de acciones).
+  - **Datos completos.** Sin el SPY o sin las entregas fallidas, la ronda no se lanza. Antes, la prueba contra el SPY
+    habría sido contra cero.
+  - **Recuento de operaciones, sin mirar ningún resultado** (entrenamiento / examen / reservado):
+
+    | Variante | Operaciones |
+    |---|---|
+    | H8 todas las compras | 824 / 2.791 / 3.203 |
+    | H8 los 12 cargos de dirección | 7 / 14 / 343 |
+    | H8 empresas de su estado | 44 / 160 / 157 |
+    | H9 Berkshire | 21 / 29 / 17 |
+    | H9 consenso | 52 / 48 / 38 |
+    | H9 apuestas nuevas | 128 / 161 / 160 |
+
+    Con el mínimo de 100 en el entrenamiento, solo pueden elegirse "todas las compras" (H8) y "apuestas nuevas"
+    (H9). Las otras cuatro se informan, pero con tan pocas operaciones no demuestran nada, ni a favor ni en contra.
+    Los cargos de dirección tienen 343 en el reservado porque Lisa McClain, presidenta de la conferencia republicana
+    desde 2025, compró mucho.
+
 ## Pendientes, por orden
 
 Los pendientes 1 y 5 solo se pueden comprobar en el ordenador del usuario; desde la nube fue imposible.

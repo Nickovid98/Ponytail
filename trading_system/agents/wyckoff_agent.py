@@ -3,7 +3,7 @@ import numpy as np
 
 import config
 from agents import Signal, neutral
-from utils.risk_manager import is_stock
+from utils.risk_manager import on_yahoo
 
 
 class WyckoffAgent:
@@ -14,7 +14,7 @@ class WyckoffAgent:
     rng = 60  # velas que se examinan como posible rango
 
     async def run(self, symbol, market) -> Signal:
-        tf = config.STOCK_TIMEFRAME if is_stock(symbol) else self.timeframe  # acciones: velas de 1 h
+        tf = config.STOCK_TIMEFRAME if on_yahoo(symbol) else self.timeframe  # acciones y divisas: velas de 1 h
         return self.analyze(symbol, await market.ohlcv(symbol, tf, self.limit))
 
     @staticmethod
@@ -52,6 +52,8 @@ class WyckoffAgent:
         # ST, LPS...) y confunde rangos de continuación con acumulación. Sirve
         # como sesgo de medio plazo, no como gatillo de entrada.
         r = cls.rng
+        if len(df) >= r + 30 and not df.volume.iloc[-r:].sum() > 0:  # Yahoo no da volumen de las divisas
+            return neutral(cls.name, symbol, "sin datos de volumen: Wyckoff no puede leer este mercado")
         vp = cls.volume_profile(df) if len(df) >= r + 30 else None
         if vp is None:
             return neutral(cls.name, symbol, "histórico insuficiente")

@@ -87,9 +87,11 @@ class ScenarioAgent:
         stock = risk.is_stock(symbol)
         if stock and risk.nyse_open_since() is None:
             return {"why": "bolsa de Nueva York cerrada: los escenarios se hacen con la sesión en marcha"}
+        if risk.is_fx(symbol) and risk.fx_open_since() is None:
+            return {"why": "mercado de divisas cerrado: abre el domingo a las 17:00 de Nueva York"}
         bars = await market.ohlcv(symbol, "5m", 5000 if stock else 1000)
         price = await market.price(symbol)
-        atr_v = risk.atr(await market.ohlcv(symbol, config.STOCK_TIMEFRAME if stock else config.ATR_TIMEFRAME, 100))
+        atr_v = risk.atr(await market.ohlcv(symbol, config.STOCK_TIMEFRAME if risk.on_yahoo(symbol) else config.ATR_TIMEFRAME, 100))
         if stock:
             pools, why = self.stock_pools(bars)
             if pools is None:
@@ -108,6 +110,14 @@ class ScenarioAgent:
             c = closed.close.to_numpy(float)
             pools = np.column_stack([closed[x].to_numpy(float)[1:] / c[:-1] for x in ("open", "high", "low", "close")])
             steps, horizon = [None] * int(config.SCENARIO_HOURS * 12), f"{config.SCENARIO_HOURS:g} h"
+            hours = risk.fx_hours(dt.datetime.now(dt.timezone.utc).astimezone(risk.NEW_YORK)) if risk.is_fx(symbol) else None
+            if hours:  # divisas: el escenario acaba, como mucho, cuando se cierra todo antes del fin de semana
+                left = int((hours[1] - dt.timedelta(minutes=config.FX_FLAT_MIN)
+                            - dt.datetime.now(dt.timezone.utc)).total_seconds() // 300)
+                if left < 1:
+                    return {"why": "queda menos de una vela hasta el cierre de las divisas"}
+                if left < len(steps):
+                    steps, horizon = steps[:left], f"hasta las {hours[1] - dt.timedelta(minutes=config.FX_FLAT_MIN):%H:%M} del viernes en Nueva York"
         rng = np.random.default_rng(SEED + zlib.crc32(symbol.encode()) % 10_000)
         draws = np.stack([self._draw(rng, pools, i) for i in steps], axis=1)  # (escenarios, tramos, o/h/l/c)
         return {"sides": self.outcomes(price, atr_v, draws, symbol), "n": config.SCENARIOS, "horizon": horizon}

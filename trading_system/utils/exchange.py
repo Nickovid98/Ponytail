@@ -97,10 +97,10 @@ def make_exchange():
 
 
 class Market:
-    """Datos de mercado cacheados. Cripto por CCXT; las acciones (símbolos sin "/") por Yahoo."""
+    """Datos de mercado cacheados. Cripto por CCXT; las acciones (símbolos sin "/") y las divisas (EUR/USD...) por Yahoo."""
 
     def __init__(self):
-        crypto = [s for s in config.SYMBOLS if not rm.is_stock(s)]
+        crypto = [s for s in config.SYMBOLS if not rm.on_yahoo(s)]
         self.ex = make_exchange() if crypto or not config.SYMBOLS else None  # solo acciones: no hace falta exchange
         if self.ex and config.EXECUTION_MODE == "sandbox" and config.EXCHANGE_ID != "alpaca":
             kind = config.SANDBOX_KIND
@@ -117,14 +117,14 @@ class Market:
     async def start(self) -> None:
         if self.ex:
             await self.ex.load_markets()
-            missing = [s for s in config.SYMBOLS if not rm.is_stock(s) and s not in self.ex.markets]
+            missing = [s for s in config.SYMBOLS if not rm.on_yahoo(s) and s not in self.ex.markets]
             if missing:
                 raise SystemExit(f"Símbolos desconocidos en {config.EXCHANGE_ID}: {missing}")
-        for s in filter(rm.is_stock, config.SYMBOLS):
+        for s in filter(rm.on_yahoo, config.SYMBOLS):
             try:
-                await yahoo_chart(s, "1d", "5d")
+                await yahoo_chart(rm.yahoo_symbol(s), "1d", "5d")
             except YahooUnknown as e:
-                raise SystemExit(f"Sin datos de la acción {s} en Yahoo: {e}") from e
+                raise SystemExit(f"Sin datos de {s} en Yahoo: {e}") from e
             except ConnectionError as e:  # pasajero: arranca igual (cripto no espera) y los bots lo reintentan
                 log.warning("Yahoo no respondió al arrancar con %s: %s", s, e)
 
@@ -132,13 +132,13 @@ class Market:
         interval = "1h" if tf == "4h" else tf
         if interval not in YAHOO_RANGE:
             raise ValueError(f"Yahoo no da velas de {tf}")
-        # Con la bolsa cerrada las velas no cambian y se guardan 30 min; la clave cambia al abrir, así que en la
+        # Con el mercado cerrado las velas no cambian y se guardan 30 min; la clave cambia al abrir, así que en la
         # apertura se piden nuevas al momento en vez de seguir con las de ayer.
-        open_now = rm.nyse_open_since() is not None
+        open_now = (rm.nyse_open_since() if rm.is_stock(symbol) else rm.fx_open_since()) is not None
         key = f"ohlcv:yahoo:{symbol}:{interval}:{'abierta' if open_now else 'cerrada'}"
         rows = cache.cache_get(key)
         if rows is None:
-            rows = (await yahoo_chart(symbol, interval, YAHOO_RANGE[interval]))["rows"]
+            rows = (await yahoo_chart(rm.yahoo_symbol(symbol), interval, YAHOO_RANGE[interval]))["rows"]
             cache.cache_set(key, rows, cache.window(self._seconds(interval) / 4) if open_now else 1800)
         df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
         df["ts"] = pd.to_datetime(df.ts, unit="ms", utc=True)
@@ -155,7 +155,7 @@ class Market:
         return int(tf[:-1]) * {"m": 60, "h": 3600, "d": 86400}[tf[-1]]
 
     async def ohlcv(self, symbol: str, tf: str, limit: int = 300) -> pd.DataFrame:
-        if rm.is_stock(symbol):
+        if rm.on_yahoo(symbol):
             return await self._stock_bars(symbol, tf, limit)
         key = f"ohlcv:{config.EXCHANGE_ID}:{config.EXECUTION_MODE}:{symbol}:{tf}:{limit}"
         rows = cache.cache_get(key)
@@ -184,12 +184,15 @@ class Market:
         return df
 
     async def price(self, symbol: str) -> float:
-        stock = rm.is_stock(symbol)
-        key = f"price:{'yahoo' if stock else config.EXCHANGE_ID}:{config.EXECUTION_MODE}:{symbol}"
+        yahoo = rm.on_yahoo(symbol)
+        key = f"price:{'yahoo' if yahoo else config.EXCHANGE_ID}:{config.EXECUTION_MODE}:{symbol}"
         p = cache.cache_get(key)
         if p is None:
-            if stock:  # la petición más pequeña que trae el precio; fuera de la sesión, Yahoo da el último cierre
-                p = (await yahoo_chart(symbol, "1d", "1d"))["price"]
+            if yahoo:  # la petición más pequeña que trae el precio; fuera de la sesión, Yahoo da el último cierre
+                c = await yahoo_chart(rm.yahoo_symbol(symbol), "1d", "1d")
+                # En divisas la cabecera viene redondeada a 4 decimales (en JPY/USD, hasta un 0,8 %, varias veces el
+                # stop); el cierre de la vela del día, que es el último precio, los trae todos.
+                p = c["rows"][-1][4] if rm.is_fx(symbol) and c["rows"] else c["price"]
             else:
                 p = float((await self.ex.fetch_ticker(symbol))["last"])
             cache.cache_set(key, p, 5)
@@ -197,8 +200,8 @@ class Market:
 
     async def book_imbalance(self, symbol: str, depth: int = 20) -> float:
         """(bids - asks) / (bids + asks) en los primeros niveles del libro: [-1, 1]."""
-        if rm.is_stock(symbol):
-            raise NotImplementedError("Yahoo no da el libro de órdenes de las acciones")
+        if rm.on_yahoo(symbol):
+            raise NotImplementedError("Yahoo no da el libro de órdenes de las acciones ni de las divisas")
         key = f"book:{config.EXCHANGE_ID}:{symbol}"
         v = cache.cache_get(key)
         if v is None:
@@ -255,16 +258,19 @@ class PaperBroker:
         # Mejora: stream de ticks por websocket.
         # Se mira desde la apertura de la operación, vela a vela y en orden: un stop tocado mientras el motor
         # estaba apagado también cuenta. Con velas de 1 min hasta donde llegan (16 h en cripto, la sesión de hoy
-        # en acciones); si la operación es más vieja, con velas más gruesas para no perder lo de antes.
-        long, stock = t["side"] == "LONG", rm.is_stock(t["symbol"])
+        # en acciones); si la operación es más vieja, con velas más gruesas para no perder lo de antes. En divisas,
+        # siempre de 5 min: Yahoo solo da las de 1 min del día en curso y una operación puede venir de ayer.
+        long, stock, yahoo = t["side"] == "LONG", rm.is_stock(t["symbol"]), rm.on_yahoo(t["symbol"])
         age = time.time() - t["opened_ts"]
         if stock:
             since_open = rm.nyse_open_since()
             tf = "1m" if since_open is not None and t["opened_ts"] >= since_open else "5m"
+        elif yahoo:
+            tf = "5m"
         else:
             tf = "1m" if age < 16 * 3600 else "5m" if age < 3.4 * 86400 else "1h"
         step = {"1m": 60, "5m": 300, "1h": 3600}[tf]
-        bars = min(1000 if not stock else 5000, 60 * (int(age // (60 * step)) + 1) + 10)  # tramos de 60: caché
+        bars = min(5000 if yahoo else 1000, 60 * (int(age // (60 * step)) + 1) + 10)  # tramos de 60: caché
         df = await self.market.ohlcv(t["symbol"], tf, bars)
         since = df[df.ts >= pd.Timestamp(t["opened_ts"], unit="s", tz="UTC")]
         last = await self.market.price(t["symbol"])
@@ -274,9 +280,9 @@ class PaperBroker:
             lo, hi, first = (b.low, b.high, b.open) if b is not None else (last, last, last)
             # Si una misma vela toca ambos niveles se asume el stop: lo conservador.
             if hit_sl(lo, hi):
-                # Acciones: si la vela abrió ya pasado el stop, o el precio de ahora ya lo está (un hueco en la
-                # apertura o tras una parada), la orden a mercado se ejecuta ahí, no en el stop.
-                ref = first if stock and hit_sl(first, first) else t["sl"]
+                # Acciones y divisas: si la vela abrió ya pasado el stop, o el precio de ahora ya lo está (un hueco
+                # en la apertura, tras una parada o tras el fin de semana), la orden a mercado se ejecuta ahí.
+                ref = first if yahoo and hit_sl(first, first) else t["sl"]
                 return self._fill(t["symbol"], ref, t["qty"], buying=not long, reason="SL")  # el stop es orden a mercado
             if hit_tp(lo, hi):
                 return self._fill(t["symbol"], t["tp"], t["qty"], buying=not long, market_order=False, reason="TP")  # límite

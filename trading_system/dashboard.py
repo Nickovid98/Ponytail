@@ -21,10 +21,12 @@ import config
 import optimizer
 from agents import AGENT_LABELS
 from utils import db, token_budget, trade_logger
-
+from utils import public_data as pdx
 from utils import risk_manager as risk
 
 FUNDED = config.FUNDED  # abierta con "Iniciar cuenta de fondeo.bat"
+KINDS = (["cripto"] * any(not risk.on_yahoo(s) for s in config.SYMBOLS) + ["acciones"] * bool(config.STOCKS)
+         + ["divisas"] * bool(config.FOREX))  # lo que opera la cuenta
 st.set_page_config(page_title="Cuenta de fondeo" if FUNDED else "Mesa de bots", page_icon="👾", layout="wide")
 # Cada base de datos (tu cuenta, la de fondeo) con su registro del motor y su laboratorio: las dos apps pueden
 # estar abiertas a la vez sin pisarse.
@@ -205,7 +207,8 @@ with st.sidebar:
     if target != db.get_state("ui:target", 40):
         db.set_state("ui:target", target)
     st.caption(f"{config.EXCHANGE_ID} · comisión {config.FEE_PCT} % + deslizamiento {config.SLIPPAGE_PCT} % por lado"
-               + (f" · acciones (Yahoo): {config.STOCK_FEE_PCT} % + {config.STOCK_SLIPPAGE_PCT} %" if config.STOCKS else ""))
+               + (f" · acciones (Yahoo): {config.STOCK_FEE_PCT} % + {config.STOCK_SLIPPAGE_PCT} %" if config.STOCKS else "")
+               + (f" · divisas (Yahoo): {config.FX_FEE_PCT} % + {config.FX_SLIPPAGE_PCT} %" if config.FOREX else ""))
 
 
 # --- Piezas compartidas por lo vivo y lo simulado -----------------------------
@@ -343,6 +346,14 @@ def funded_panel(acct: dict) -> None:
                        f"primeros {config.STOCK_OPEN_WAIT_MIN:g} min ni en los últimos {config.STOCK_LAST_ENTRY_MIN:g}, y se "
                        f"cierran {config.STOCK_FLAT_MIN:g} min antes del cierre (16:00, o 13:00 los días de cierre temprano). "
                        "Cripto opera las 24 h.")
+        if config.FOREX:
+            entries, _ = risk.fx_session()
+            state = "abierto, el jefe puede entrar" if entries else "abierto, ahora sin entradas nuevas" \
+                if risk.fx_open_since() else "cerrado (fin de semana)"
+            st.caption(f"Mercado de divisas {state}. {', '.join(config.FOREX)} con velas de {config.STOCK_TIMEFRAME}: "
+                       f"abre el domingo a las 17:00 de Nueva York (se entra desde {config.FX_OPEN_WAIT_MIN:g} min después, "
+                       f"cuando Yahoo ya da precios), no se entra en los últimos {config.FX_LAST_ENTRY_MIN:g} min del viernes "
+                       f"y todo se cierra {config.FX_FLAT_MIN:g} min antes de su cierre, a las 17:00.")
         fund = db.get_state("fund", {})
         if fund.get("gen", 1) > 1:
             st.caption(f"Lo que corrige esta cuenta: {fund.get('lesson')}")
@@ -358,7 +369,8 @@ def funded_panel(acct: dict) -> None:
 def control_room() -> None:
     if FUNDED:
         st.success(f"**CUENTA DE FONDEO SIMULADA** · {config.CAPITAL:,.0f} {config.QUOTE}"
-                   + (" · cripto y acciones" if config.STOCKS else "") + ", en largo y en corto · precios reales, "
+                   + (" · " + ", ".join(KINDS[:-1]) + " y " + KINDS[-1] if len(KINDS) > 1 else "")
+                   + ", en largo y en corto · precios reales, "
                    "ninguna orden sale de este equipo")
     elif config.EXECUTION_MODE == "paper":
         st.success("**SIMULACIÓN CON PRECIOS REALES** · ninguna orden sale de este equipo")
@@ -608,9 +620,10 @@ def lab() -> None:
     par = optimizer.params()
     with st.form("lab"):
         c = st.columns(3)
-        market = c[0].radio("Mercado", ["Cripto (tu exchange)", "Acciones de EE. UU. (Yahoo)"])
-        symbols = c[0].text_input("Activos, separados por comas", help="Vacío: los de tu configuración para cripto, o "
-                                  "NVDA, META, GOOGL, TTWO, MU, MSFT, UBER para acciones.")
+        market = c[0].radio("Mercado", ["Cripto (tu exchange)", "Acciones de EE. UU. (Yahoo)", "Divisas (Yahoo)"])
+        symbols = c[0].text_input("Activos, separados por comas", help="Vacío: los de tu configuración para cripto, "
+                                  "NVDA, META, GOOGL, TTWO, MU, MSFT, UBER para acciones o EUR/USD, GBP/USD, JPY/USD "
+                                  "para divisas (el yen se escribe JPY/USD).")
         days = c[0].number_input("Días a simular", 7, 730, 30, help="Acciones: hasta 730 (velas de 1 h). Cripto: velas de 5 min.")
         strategy = c[1].radio("Quién opera", ["Los bots en equipo", "Ruptura del rango de apertura (solo acciones)"])
         evolution = c[1].toggle("Con selección natural", value=True,
@@ -626,26 +639,29 @@ def lab() -> None:
         rr = c[2].slider("Objetivo (veces el riesgo)", 1.0, 5.0, float(par["REWARD_RISK"]), 0.5)
         go_ = st.form_submit_button("🧪 Simular", type="primary")
     if go_:
-        stocks, orb = market.startswith("Acciones"), strategy.startswith("Ruptura")
+        stocks, fx, orb = market.startswith("Acciones"), market.startswith("Divisas"), strategy.startswith("Ruptura")
         if orb and not stocks:
             st.error("La ruptura del rango de apertura necesita un mercado con sesiones: elige acciones.")
         else:
             env = {"PAPER_TRADING": "true", "BROKER": "ccxt", "CAPITAL": str(capital), "RISK_PER_TRADE_PCT": str(risk_pct),
                    "DECISION_THRESHOLD": str(threshold), "REWARD_RISK": str(rr), "STRATEGY": "orb" if orb else "ensemble"}
-            if symbols.strip() or stocks:
-                env["SYMBOLS"] = symbols.strip().upper() or "NVDA,META,GOOGL,TTWO,MU,MSFT,UBER"
+            if symbols.strip() or stocks or fx:
+                env["SYMBOLS"] = symbols.strip().upper() or ("EUR/USD,GBP/USD,JPY/USD" if fx else "NVDA,META,GOOGL,TTWO,MU,MSFT,UBER")
             else:  # cripto: solo los pares de cripto de la configuración (la de fondeo también lleva acciones)
-                env["SYMBOLS"] = ",".join(s for s in config.SYMBOLS if "/" in s) or "BTC/USDT:USDT,ETH/USDT:USDT"
-            if stocks:
+                env["SYMBOLS"] = ",".join(s for s in config.SYMBOLS if "/" in s and not risk.is_fx(s)) \
+                    or "BTC/USDT:USDT,ETH/USDT:USDT"
+            if stocks or fx:  # las simulaciones llevan un solo coste: el de las acciones o el de las divisas
                 env |= {"EXCHANGE_ID": "yahoo", "QUOTE": "USD", "SMC_TIMEFRAME": "1h", "ATR_TIMEFRAME": "1h",
-                        "WYCKOFF_TIMEFRAME": "1h", "FEE_PCT": "0.005", "SLIPPAGE_PCT": "0.02", "MIN_AGENTS": "1" if orb else "3"}
+                        "WYCKOFF_TIMEFRAME": "1h", "MIN_AGENTS": "1" if orb else "3",
+                        "FEE_PCT": str(config.FX_FEE_PCT) if fx else "0.005",
+                        "SLIPPAGE_PCT": str(config.FX_SLIPPAGE_PCT) if fx else "0.02"}
             # Sin reglas de fondeo no hay límite diario en dólares, aunque la app sea la de la cuenta de fondeo:
             # la simulación hereda el entorno de la app y, si no, arrastraría su kill switch.
             env |= {"PROP_DAILY_LOSS_LIMIT_USD": "0", "PROP_MAX_LOSS_USD": "0"}  # el backtest lleva su propio --lineage
             if funded or walk:
                 env |= {"TOTAL_LOSS_LIMIT_USD": "0", "PROP_DAILY_LOSS_LIMIT_USD": str(max_loss / 2)}
             args = ["backtest.py", "--days", str(days)] + (["--evolution"] if evolution and not orb else [])
-            args += (["--lineage", str(max_loss)] + (["--flat"] if stocks else [])) if funded or walk else []
+            args += (["--lineage", str(max_loss)] + (["--flat"] if stocks or fx else [])) if funded or walk else []
             args += ["--walk-forward", "180,60"] if walk and orb else ["--save", str(LAB / "sim.json")]
             LAB.mkdir(parents=True, exist_ok=True)
             (LAB / "sim.json").unlink(missing_ok=True)
@@ -655,7 +671,114 @@ def lab() -> None:
     st.fragment(run_every=2 if running else None)(lab_status)()
 
 
-# --- 5. Ajustes --------------------------------------------------------------
+# --- 5. Políticos y grandes inversores ------------------------------------------
+LAB_WHAT = {"H8": "copiar a los políticos", "H9": "copiar a los grandes inversores"}
+
+
+def watch_verdict() -> None:
+    """Lo que dijo el laboratorio de la tercera ronda, si ya se pasó."""
+    for name, label in (("holdout3.json", "Periodo reservado"), ("exam3.json", "Examen"), ("train3.json", "Entrenamiento")):
+        f = pdx.DIR / "lab" / name
+        if not f.exists():
+            continue
+        data = json.loads(f.read_text())
+        if "choice" in data:
+            parts = [f"{LAB_WHAT.get(k, k)}: {'pasa al examen' if v else 'descartado'}" for k, v in data["choice"].items()]
+        else:
+            parts = [f"{LAB_WHAT.get(k, k)}: {'aprueba' if r.get('pass') else 'suspende'}" for k, r in data["result"].items()]
+        st.info(f"**{label} del laboratorio (tercera ronda):** " + " · ".join(parts) + " (detalle en ESTADO.md)")
+        return
+
+
+def watch_congress() -> None:
+    st.subheader("🏛️ Políticos: lo último que declararon")
+    path = pdx.DIR / "congress" / "latest.parquet"
+    c = st.columns([1, 3])
+    if c[0].button("Actualizar declaraciones", help="Descarga las 5.000 últimas del archivo abierto de Kadoa (unos 4 MB)."):
+        with st.spinner("Descargando…"):
+            try:
+                pdx.congress_latest(days=0)
+            except (ConnectionError, FileNotFoundError, ValueError) as e:
+                st.warning(f"No se pudo descargar: {e}")
+    if not path.exists():
+        st.info("Pulsa «Actualizar declaraciones» para descargarlas.")
+        return
+    df = pd.read_parquet(path)
+    c[1].caption(f"Copia del {clock(path.stat().st_mtime, '%d-%m-%Y %H:%M')} · {len(df):,} operaciones declaradas del "
+                 f"{df.filed.min():%d-%m-%Y} al {df.filed.max():%d-%m-%Y}. Fuente: kadoa-org/congress-trading-monitor, "
+                 "sacada de las páginas de la Cámara, el Senado y la Oficina de Ética del Gobierno.")
+    f = st.columns(3)
+    mine = f[0].toggle("Solo mis acciones", value=False, disabled=not config.STOCKS)
+    buys = f[1].toggle("Solo compras", value=False)
+    days = f[2].slider("Declaradas en los últimos días", 7, 180, 60)
+    view = df[df.filed >= df.filed.max() - pd.Timedelta(days=days)]
+    if mine:
+        view = view[view.ticker.isin(config.STOCKS)]
+    if buys:
+        view = view[view.kind == "Purchase"]
+    view = view.sort_values("filed", ascending=False)
+    kinds = {"Purchase": "Compra", "Sale (Full)": "Venta total", "Sale (Partial)": "Venta parcial", "Exchange": "Canje"}
+    st.dataframe(pd.DataFrame({
+        "Declarada": view.filed.dt.strftime("%d-%m-%Y"), "Operación": view.traded.dt.strftime("%d-%m-%Y"),
+        "Quién": view.name, "Partido": view.party,
+        "Dónde": view.chamber.map({"house": "Cámara", "senate": "Senado"}).fillna("Gobierno"),
+        "Acción": view.ticker, "Qué": view.kind.map(kinds).fillna(view.kind),
+        "Importe (USD)": [f"{lo:,.0f}–{hi:,.0f}" if lo == lo and hi == hi else "" for lo, hi in zip(view.usd_low, view.usd_high)],
+        "Días en declararla": (view.filed - view.traded).dt.days}), hide_index=True, width="stretch", height=320)
+    top = view[view.kind == "Purchase"].groupby("ticker").name.nunique().sort_values(ascending=False).head(10)
+    if len(top):
+        st.caption("Las más compradas en ese periodo, por número de políticos distintos: "
+                   + ", ".join(f"{t} ({n})" for t, n in top.items()))
+
+
+def watch_funds() -> None:
+    st.subheader("💼 Grandes inversores: su último 13F")
+    c = st.columns([2, 1, 3])
+    who = c[0].selectbox("Gestor", list(pdx.MANAGERS))
+    fresh = c[1].button("Actualizar 13F", help="Pregunta a la SEC si este gestor ha presentado un 13F nuevo.")
+    if not fresh and not all((pdx.DIR / "13f" / str(cik) / "filings.parquet").exists() for cik in pdx.MANAGERS[who]):
+        c[2].info("Pulsa «Actualizar 13F» para descargar sus 13F de la SEC (la primera vez, un minuto).")
+        return  # al abrir la app no se pide nada a la red
+    try:
+        with st.spinner("Leyendo sus 13F…"):
+            h = pd.concat([pdx.holdings13f(cik, days=0 if fresh else 3650) for cik in pdx.MANAGERS[who]],
+                          ignore_index=True)
+    except (ConnectionError, FileNotFoundError, ValueError, KeyError) as e:
+        st.warning(f"No se pudo leer de la SEC: {e}")
+        return
+    h = h[~h.amendment.astype(bool)].dropna(subset=["period"])
+    if h.empty:
+        st.info("Sin 13F en XML de este gestor.")
+        return
+    periods = sorted(h.period.unique())
+    last = h[h.period == periods[-1]]
+    prev = h[h.period == periods[-2]] if len(periods) > 1 else h.iloc[:0]
+    tickers = pdx.cusips(days=3650) if (pdx.DIR / "cusips.json").exists() else {}
+    cur = last.groupby("cusip").agg(issuer=("issuer", "first"), value=("value", "sum"), shares=("shares", "sum"))
+    cur = cur.sort_values("value", ascending=False)
+    before = prev.groupby("cusip").shares.sum()
+    change = ["nueva" if k not in before.index else f"{s / before[k] - 1:+.0%} en acciones" if before[k] else ""
+              for k, s in zip(cur.index, cur.shares)]
+    c[2].caption(f"Trimestre que acaba el {pd.Timestamp(periods[-1]):%d-%m-%Y}, público desde el "
+                 f"{last.accepted.max().tz_convert(pdx.NY):%d-%m-%Y}: {len(cur)} posiciones y {cur.value.sum() / 1e9:,.2f} "
+                 "mil millones de USD. Un split cambia el número de acciones sin que el gestor compre.")
+    st.dataframe(pd.DataFrame({"Empresa": cur.issuer, "Ticker": [tickers.get(k, "") for k in cur.index],
+                               "Valor (millones USD)": cur.value / 1e6, "% de la cartera": cur.value / cur.value.sum(),
+                               "Frente al trimestre anterior": change}).head(15).style.format(
+        {"Valor (millones USD)": "{:,.1f}", "% de la cartera": "{:.1%}"}), hide_index=True, width="stretch")
+
+
+def watch_room() -> None:
+    st.markdown("Lo que **declaran** los congresistas y senadores de EE. UU. (ley STOCK Act) y lo que tienen los grandes "
+                "inversores según sus **13F** en la SEC. Llega tarde: una declaración, de mediana 31 días después de la "
+                "operación; un 13F, hasta 45 días después del trimestre. Verlo no da ventaja por sí solo: el laboratorio "
+                "comprueba si copiarlos gana.")
+    watch_verdict()
+    watch_congress()
+    watch_funds()
+
+
+# --- 6. Ajustes --------------------------------------------------------------
 def settings() -> None:
     left, right = st.columns([3, 2])
     with left:
@@ -703,7 +826,8 @@ def settings() -> None:
         st.caption("Al agotarse el presupuesto diario, Claude se apaga hasta mañana y el sistema sigue con sus reglas fijas.")
 
 
-tabs = st.tabs(["🏠 Sala de control", "👾 Los bots", "👔 El Jefe", "🧪 Laboratorio", "⚙️ Ajustes"])
-for tab, page in zip(tabs, (control_room, bots_room, boss_room, lab, settings)):
+tabs = st.tabs(["🏠 Sala de control", "👾 Los bots", "👔 El Jefe", "🧪 Laboratorio", "🏛️ Políticos y fondos",
+                "⚙️ Ajustes"])
+for tab, page in zip(tabs, (control_room, bots_room, boss_room, lab, watch_room, settings)):
     with tab:
         page()

@@ -250,7 +250,7 @@ continuo. Con la clave de una cuenta paper el límite deja de ser un problema;
 la clave solo se usa para leer datos. Los cortos que abra la simulación no se
 podrían replicar en una cuenta de Alpaca.
 
-## Cuenta de fondeo simulada: cripto y acciones
+## Cuenta de fondeo simulada: cripto, acciones y divisas
 
 `Iniciar cuenta de fondeo.bat` arranca la app y el motor con estas reglas, que
 mandan sobre `.env` solo en esa ventana (son las de las simulaciones de cuenta
@@ -263,7 +263,7 @@ fondeada de `ESTADO.md`):
 | Pérdida diaria | 1.000; al 75 % (750) se cierra todo y no se opera hasta el día siguiente (UTC) |
 | Pérdida máxima | la cuenta se pierde al caer 2.000 bajo su mejor cierre diario; ese suelo deja de subir en 50.000 |
 | Margen | no se abre nada cuyo stop, sumado al de lo abierto, pase de lo que queda hasta el kill switch o el suelo |
-| Activos | BTC y ETH (Binance) y NVDA, META, GOOGL, TTWO, MU, MSFT y UBER, en largo y en corto |
+| Activos | BTC y ETH (Binance), NVDA, META, GOOGL, TTWO, MU, MSFT y UBER, y EUR/USD, GBP/USD y JPY/USD, en largo y en corto |
 | Posiciones a la vez | 3, apalancamiento máximo 2x por posición |
 
 Todo es simulado (`PAPER_TRADING=True` forzado): precios reales y ninguna orden
@@ -286,6 +286,25 @@ entonces. Los festivos de 2026 y 2027 vienen de la skill `trader-alerts`. Costes
 `STOCK_SLIPPAGE_PCT`), acciones enteras redondeadas hacia abajo, y un stop que
 salta con un hueco de precio se ejecuta donde abrió esa vela. Las acciones solo
 se simulan: con `PAPER_TRADING=False` el programa no arranca.
+
+**Divisas.** Un par contra el dólar (EUR/USD, GBP/USD, AUD/USD, NZD/USD y, al
+revés que en la calle, JPY/USD, CAD/USD y CHF/USD, como los futuros de Chicago,
+para que el resultado salga en dólares) se simula con precios de Yahoo, sin
+volumen ni libro de órdenes: Wyckoff vota neutral. Velas de 1 hora para SMC,
+Wyckoff y el stop, como las acciones. El mercado abre el domingo a las 17:00 de
+Nueva York y cierra el viernes a las 17:00. Se entra desde 3 horas después de
+abrir (antes Yahoo no da precios) hasta una hora antes del cierre del viernes, y
+todo se cierra 5 minutos antes: nada pasa el fin de semana abierto. Lo que quede
+abierto (el motor estaba apagado) se cierra en cuanto Yahoo vuelve a dar precios.
+El precio de cada par es el último cierre de Yahoo, no el de su cabecera, que
+viene redondeado a 4 decimales (en el yen, hasta un 0,8 %). Costes: 0,0035 % de
+comisión (3,5 USD por lote de 100.000) y 0,005 % de medio diferencial y
+deslizamiento por lado (`FX_FEE_PCT`, `FX_SLIPPAGE_PCT`). Con el apalancamiento
+máximo de 2x cada operación arriesga unos 50-100, no 200: el stop queda muy cerca.
+`EURUSD=X` (el nombre de Yahoo) y `USD/JPY` se rechazan al arrancar, con el nombre
+que hay que escribir. Solo se simulan: con `PAPER_TRADING=False` no arranca. En
+Topstep el euro es el futuro M6E o 6E y se pone en `SYMBOLS` tal cual (sin probar
+contra el servicio real).
 
 **Relevo de cuenta.** La cuenta se pierde la primera vez que toca el suelo, aunque
 el precio rebote después: se cierra todo (mientras quede algo sin cerrar no se
@@ -401,6 +420,15 @@ costes, veto al par activo/lado que más perdió, umbral más alto y, por últim
 menos riesgo por operación. `--flat` cierra todo al final de cada sesión y no
 entra en la última media hora (acciones). El informe da el resultado por semana.
 
+Desde el 26-11, antes de esas reglas fijas, el sucesor busca pruebas en dos
+periodos: la cuenta perdida y todas las anteriores (en la primera muerte, sus dos
+mitades). Prueba a vetar cada par activo/lado o a subir el umbral, solo con lo que
+la configuración de ahora aún operaría, y la corrección vale si en los dos
+periodos habría quitado al menos 5 operaciones que pierden de verdad (media
+negativa con t ≥ 2). `--rules` usa solo las reglas fijas, para comparar las dos
+formas (`ESTADO.md`, "Relevo con pruebas"); el motor en vivo sigue con las reglas
+fijas hasta que esa comparación decida.
+
 Cada bot solo aprende del pasado, así que el recorrido completo es una prueba
 honesta de si el aprendizaje sirve. Deja de serlo si se cambian las reglas y se
 repite hasta que el año salga bien: eso es memorizar el año.
@@ -449,6 +477,12 @@ Fuentes gratuitas y sin clave, con copia en `data/public/` (fuera de git):
 - **State Street.** La lista del S&P 500, 400 y 600.
 - **Reserva Federal y BLS.** El calendario de anuncios.
 - **Yahoo.** Precios diarios desde 2008 y velas de 1 hora de casi tres años.
+- **Políticos.** Lo que declaran congresistas y senadores por la ley STOCK Act, del archivo abierto
+  `kadoa-org/congress-trading-monitor` (MIT), sacado de las páginas de la Cámara y el Senado (`congress`, con una
+  versión fija para el laboratorio, y `congress_latest`, la del día, para la app).
+- **Grandes inversores.** Los 13F de 26 gestores conocidos (`MANAGERS`: Buffett, Ackman, Burry, Soros...), desde
+  2013, y para traducir cada CUSIP a su ticker los fondos de State Street (`cusips`) y las entregas fallidas de la
+  SEC (`ftd_symbols`), que dan el símbolo que tenía cada CUSIP en cada fecha.
 
 `event_lab.py` examina ideas publicadas que usan esos datos, por rondas (cuatro en la primera, tres en la segunda). Las reglas, los periodos y el criterio de
 aprobado están en `ESTADO.md`, escritos antes de mirar ningún resultado:
@@ -459,7 +493,13 @@ venv/bin/python event_lab.py train      # elige una variante de cada idea, solo 
 venv/bin/python event_lab.py exam       # la examina en 2018-2022
 venv/bin/python event_lab.py holdout    # una sola vez: de 2023 a hoy, solo lo que aprobó
 venv/bin/python event_lab.py train --round 2   # la segunda ronda (H5-H7), con su propio umbral
+venv/bin/python event_lab.py download --round 3   # tercera ronda: políticos (H8) y grandes inversores (H9)
+venv/bin/python event_lab.py train --round 3
 ```
+
+La tercera ronda mide cada compra también contra el SPY, el S&P 500 ponderado por tamaño, y exige que gane sin sus 3
+acciones que más aportan. La pestaña "Políticos y fondos" de la app enseña lo último que declararon los políticos y
+el último 13F de cada gestor, y lo que dijo el laboratorio.
 
 ## ¿Cobrar rápido en una cuenta de fondeo? (`prop_plan.py`)
 

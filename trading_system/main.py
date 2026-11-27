@@ -139,7 +139,9 @@ async def _main(once: bool) -> None:
         boss = BossAgent(market, broker, {a.name: 3 * a.interval + 60 for a in agents}, evo, notifier.send)
         log.info("%s en %s · %s · riesgo %.1f%%/op · comisión %.3f%% + deslizamiento %.3f%% por lado · Claude %s",
                  {"paper": "PAPER TRADING", "sandbox": "SANDBOX", "live": "REAL TRADING"}[config.EXECUTION_MODE],
-                 "TopstepX" if config.BROKER == "topstepx" else config.EXCHANGE_ID + (" y Yahoo (acciones)" if config.STOCKS else ""),
+                 "TopstepX" if config.BROKER == "topstepx" else config.EXCHANGE_ID + (
+                     f" y Yahoo ({' y '.join(k for k, v in (('acciones', config.STOCKS), ('divisas', config.FOREX)) if v)})"
+                     if config.STOCKS or config.FOREX else ""),
                  ", ".join(config.SYMBOLS), config.RISK_PER_TRADE_PCT, config.FEE_PCT,
                  config.SLIPPAGE_PCT,
                  config.CLAUDE_MODEL if config.USE_CLAUDE else "desactivado (sin ANTHROPIC_API_KEY)")

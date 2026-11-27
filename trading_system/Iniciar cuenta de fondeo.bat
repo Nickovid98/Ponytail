@@ -1,6 +1,7 @@
 @echo off
 setlocal
-rem Cuenta de fondeo SIMULADA: 50.000 USD con cripto y acciones de EE. UU., en largo y en corto.
+rem Cuenta de fondeo SIMULADA: 50.000 USD con cripto, acciones de EE. UU. y divisas (euro, libra y yen contra
+rem el dolar), en largo y en corto.
 rem Precios reales y ninguna orden sale de este equipo. Estos valores mandan sobre .env solo en esta ventana.
 rem Son las reglas de las simulaciones de cuenta fondeada (ESTADO.md): 200 de riesgo por operacion, perdida
 rem diaria de 1.000 con kill switch al 75 por ciento, y la cuenta se pierde al caer 2.000 bajo su mejor cierre
@@ -19,7 +20,7 @@ set "PROP_DAILY_LOSS_LIMIT_USD=1000"
 set "PROP_KILL_AT_PCT=75"
 set "PROP_ACCOUNT_FLOOR_USD=0"
 set "PROP_MAX_LOSS_USD=2000"
-set "SYMBOLS=BTC/USDT:USDT,ETH/USDT:USDT,NVDA,META,GOOGL,TTWO,MU,MSFT,UBER"
+set "SYMBOLS=BTC/USDT:USDT,ETH/USDT:USDT,NVDA,META,GOOGL,TTWO,MU,MSFT,UBER,EUR/USD,GBP/USD,JPY/USD"
 set "QUOTE=USD"
 set "MAX_LEVERAGE=2"
 set "MAX_OPEN_POSITIONS=3"
@@ -29,6 +30,8 @@ set "FEE_PCT=0.075"
 set "SLIPPAGE_PCT=0.02"
 set "STOCK_FEE_PCT=0.005"
 set "STOCK_SLIPPAGE_PCT=0.02"
+set "FX_FEE_PCT=0.0035"
+set "FX_SLIPPAGE_PCT=0.005"
 set "STOCK_TIMEFRAME=1h"
 set "SMC_TIMEFRAME=5m"
 set "ATR_TIMEFRAME=15m"

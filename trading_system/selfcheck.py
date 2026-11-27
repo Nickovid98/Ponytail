@@ -831,6 +831,16 @@ async def check_backtest():
     assert "Linaje:" in backtest.report(lin, 4, False)
     same = (await backtest.run(data, 4, lineage={"max_loss": 30, "learn": False}))["lineage"]["generations"]
     assert len(same) >= 2 and len({str(params(x)) for x in same}) == 1  # sin aprendizaje, el sucesor es idéntico
+    assert all(isinstance(t["score"], float) for t in lin["trades"])  # el umbral de cada lección se repasa con esto
+    looked, real_evidence = [], backtest._evidence
+    backtest._evidence = lambda *a, **kw: looked.append(1)  # ¿busca pruebas cada relevo?
+    try:
+        fixed = (await backtest.run(data, 4, lineage={"max_loss": 30, "learn": "rules"}))["lineage"]["generations"]
+        assert len(fixed) >= 2 and not looked  # con "rules", solo las reglas fijas
+        await backtest.run(data, 4, lineage={"max_loss": 30})
+        assert looked  # por defecto, con pruebas
+    finally:
+        backtest._evidence = real_evidence
     config.FEE_PCT = 0.075
 
     # Las cinco correcciones del sucesor, una por causa de muerte y en este orden de prioridad.
@@ -851,6 +861,51 @@ async def check_backtest():
         config.DECISION_THRESHOLD = 0.75
         born(b, losing)  # sin más filtros: arriesga menos
         assert config.RISK_PER_TRADE_PCT == 0.75 and config.DECISION_THRESHOLD == 0.75
+
+        # Con pruebas de dos periodos (la cuenta perdida y las anteriores) gana la corrección que habría ahorrado más
+        # en el peor de los dos; lo que solo pasó en uno no es una lección.
+        config.DECISION_THRESHOLD = 0.25
+        ids = iter(range(1, 1000))
+        tr = lambda side, pnl, score, n: [{"symbol": SYM, "side": side, "pnl": pnl, "fees": 1.0, "slippage": 0.0,
+                                          "risk": 100.0, "votes": {}, "score": score, "id": next(ids)} for _ in range(n)]
+        old = tr("SHORT", -20, -0.3, 6) + tr("LONG", 5, 0.6, 6)
+        dead = tr("SHORT", -30, -0.3, 6) + tr("LONG", 5, 0.6, 6)
+        b = backtest.successor(bot0, dead, old + dead, tfs, None)
+        assert b["blocked"] == {(SYM, "SHORT")} and "se habría ahorrado 180 en 6 operaciones de esta cuenta y 120 en 6 " \
+            "de las anteriores" in b["lesson"], b
+        assert config.DECISION_THRESHOLD == 0.25
+        lucky = tr("SHORT", 25, -0.3, 6) + tr("LONG", 5, 0.6, 6)  # antes los cortos ganaban: no hay prueba
+        b = backtest.successor(bot0, dead, lucky + dead, tfs, None)
+        assert b["blocked"] == {(SYM, "SHORT")} and "se habría ahorrado" not in b["lesson"] and "perdió" in b["lesson"], b
+        noisy = tr("SHORT", -40, -0.3, 3) + tr("SHORT", 35, -0.3, 3) + tr("LONG", 5, 0.6, 6)  # antes, ni gana ni pierde
+        b = backtest.successor(bot0, dead, noisy + dead, tfs, None)
+        assert "se habría ahorrado" not in b["lesson"], b  # media -2,5 con mucha dispersión: no es prueba
+        config.DECISION_THRESHOLD = 0.35  # ya subido por una cuenta anterior, cuyas operaciones de 0,30 perdían
+        stale_old = tr("LONG", -10, 0.30, 6) + tr("LONG", 5, 0.6, 6)
+        stale = tr("LONG", -1, 0.37, 5) + tr("LONG", 5, 0.6, 6)
+        b = backtest.successor(bot0, stale, stale_old + stale, tfs, None)
+        assert "se habría ahorrado" not in b["lesson"], b  # lo que el umbral de ahora ya quita no es prueba
+        config.DECISION_THRESHOLD = 0.75  # sin umbrales que probar y con un solo activo con su corto vetado:
+        assert backtest._evidence(tr("LONG", -9, 0.8, 6), tr("LONG", -9, 0.8, 6), {(SYM, "SHORT")}) is None  # no veta el último
+        config.DECISION_THRESHOLD = 0.25
+        few = tr("SHORT", -50, -0.3, 3) + tr("LONG", 5, 0.6, 6)  # solo 3 cortos en la cuenta perdida: no basta
+        b = backtest.successor(bot0, few, old + few, tfs, None)
+        assert "se habría ahorrado" not in b["lesson"] and b["blocked"] == set(), b
+        config.DECISION_THRESHOLD = 0.25
+        # Las de poco acuerdo pierden en los dos periodos, en largos y en cortos: sube el umbral lo justo para quitarlas.
+        weak = lambda: tr("LONG", -10, 0.3, 6) + tr("LONG", 8, 0.6, 6) + tr("SHORT", -5, -0.28, 6)
+        old, dead = weak(), weak()
+        b = backtest.successor(bot0, dead, old + dead, tfs, None)
+        assert config.DECISION_THRESHOLD == 0.35 and b["blocked"] == set() and "umbral 0.35" in b["lesson"], b
+        config.DECISION_THRESHOLD = 0.25
+        b = backtest.successor(bot0, dead, old + dead, tfs, None, evidence=False)  # las reglas fijas de antes
+        assert config.DECISION_THRESHOLD == 0.25 and b["blocked"] == {(SYM, "SHORT")}, b
+        # En la primera muerte no hay cuentas anteriores: las dos mitades de la cuenta hacen de dos periodos.
+        b = backtest.successor(bot0, weak() + weak(), [], tfs, None)
+        assert config.DECISION_THRESHOLD == 0.35 and "segunda mitad" in b["lesson"], b
+        config.DECISION_THRESHOLD = 0.25
+        b = backtest.successor(bot0, dead + lucky, [], tfs, None)  # los cortos perdían en la 1.ª mitad y ganaban en la 2.ª
+        assert "se habría ahorrado" not in b["lesson"], b
     finally:
         config.DECISION_THRESHOLD, config.ATR_TIMEFRAME, config.RISK_PER_TRADE_PCT = before
     only_long = await backtest.run(data, 4, lineage={"max_loss": 1e9, "blocked": [(SYM, "SHORT")]})
@@ -1793,6 +1848,276 @@ async def _check_funded():
     assert ok.returncode == 0 and ok.stdout.split()[-1] == "0.0", ok  # la pérdida máxima sustituye al límite total
 
 
+async def check_fx():
+    """Divisas contra el dólar con precios de Yahoo: qué es una divisa y cómo se llama allí, la semana de domingo a
+    viernes (también con el cambio de hora), costes y tamaños, velas de 1 h, sin volumen ni libro, el jefe que no
+    entra con el mercado cerrado y lo cierra todo antes del fin de semana, el backtest y los candados de config."""
+    snap = {k: v for k, v in vars(config).items() if k.isupper()}
+    for k, v in dict(BROKER="ccxt", EXECUTION_MODE="divisas", FEE_PCT=0.075, SLIPPAGE_PCT=0.02, MIN_NOTIONAL=10.0,
+                     MAX_LEVERAGE=3.0, MAX_TRADES_PER_DAY=0, MIN_ORDER_GAP_S=0.0, RISK_PER_TRADE_PCT=1.0,
+                     ATR_SL_MULT=1.5, REWARD_RISK=2.0, DECISION_THRESHOLD=0.25, MIN_AGENTS=3, MAX_SL_PCT=5.0,
+                     FX_FEE_PCT=0.0035, FX_SLIPPAGE_PCT=0.005, FX_OPEN_WAIT_MIN=180.0, FX_LAST_ENTRY_MIN=60.0,
+                     FX_FLAT_MIN=5.0, STOCK_TIMEFRAME="1h", ATR_TIMEFRAME="15m", PROP_MAX_LOSS_USD=0.0, FUNDED=False,
+                     CAPITAL=3550.0, TOTAL_LOSS_LIMIT_USD=500.0, MAX_OPEN_POSITIONS=2, COOLDOWN_S=0.0).items():
+        setattr(config, k, v)
+    try:
+        await _check_fx()
+    finally:
+        for k, v in snap.items():
+            setattr(config, k, v)
+
+
+async def _check_fx():
+    from utils import exchange
+    u = lambda *a: dt.datetime(*a, tzinfo=dt.timezone.utc)
+    # 1) Qué es una divisa y cómo se llama en Yahoo. En Topstep el euro es el futuro M6E, sin "/".
+    assert risk.is_fx("EUR/USD") and risk.is_fx("JPY/USD") and not risk.is_stock("EUR/USD")
+    for other in ("BTC/USD", "USD/JPY", "EUR/USDT", "EURUSD", "NVDA", SYM):
+        assert not risk.is_fx(other), other
+    assert risk.on_yahoo("EUR/USD") and risk.on_yahoo("NVDA") and not risk.on_yahoo("BTC/USD")
+    assert risk.yahoo_symbol("EUR/USD") == "EURUSD=X" and risk.yahoo_symbol("JPY/USD") == "JPYUSD=X"
+    assert risk.yahoo_symbol("NVDA") == "NVDA"
+    config.BROKER = "topstepx"
+    assert not risk.is_fx("EUR/USD")
+    config.BROKER = "ccxt"
+
+    # 2) La semana: abre el domingo a las 17:00 de Nueva York y cierra el viernes a las 17:00 (en noviembre, UTC-5).
+    S, O = risk.fx_session, risk.fx_open_since
+    sunday = u(2026, 11, 22, 22, 0)
+    for closed in (u(2026, 11, 20, 22, 0), u(2026, 11, 21, 15, 0), u(2026, 11, 22, 21, 59)):  # viernes 17:00, sábado
+        assert S(closed) == (False, False) and O(closed) is None, closed
+    assert O(sunday) == sunday.timestamp() and S(sunday) == (False, False)  # abierto, pero Yahoo aún no da precios
+    assert S(u(2026, 11, 23, 0, 59)) == (False, False) and S(u(2026, 11, 23, 1, 0)) == (True, False)  # 3 h después
+    Q = risk.fx_quoted  # con precios de Yahoo al día: desde 3 h después de abrir hasta el cierre del viernes
+    assert not Q(sunday) and not Q(u(2026, 11, 23, 0, 59)) and Q(u(2026, 11, 23, 1, 0)) and Q(u(2026, 11, 27, 21, 59))
+    assert not Q(u(2026, 11, 21, 15, 0)) and not Q(u(2026, 11, 27, 22, 0))
+    assert S(u(2026, 11, 25, 15, 0)) == (True, False) and O(u(2026, 11, 25, 15, 0)) == sunday.timestamp()
+    friday = u(2026, 11, 27, 22, 0)
+    assert S(friday - dt.timedelta(minutes=61)) == (True, False)
+    assert S(friday - dt.timedelta(minutes=59)) == (False, False)  # la última hora no se entra
+    assert S(friday - dt.timedelta(minutes=5)) == (False, True)  # 16:55: se cierra todo
+    assert S(friday) == (False, False) and O(friday) is None
+    # Con el cambio de hora la apertura sigue a las 17:00 de Nueva York: 21:00 UTC en verano, 22:00 en invierno.
+    assert O(u(2027, 3, 14, 21, 30)) == u(2027, 3, 14, 21, 0).timestamp()  # el domingo en que se adelanta la hora
+    assert O(u(2026, 11, 1, 22, 30)) == u(2026, 11, 1, 22, 0).timestamp() and O(u(2026, 11, 1, 21, 30)) is None
+    assert S(u(2027, 7, 16, 20, 56)) == (False, True)  # viernes de verano a las 16:56
+
+    # 3) Costes de divisas (0,0035 % + 0,005 % por lado) en el tamaño, fracciones de unidad, y el stop que salta con
+    #    un hueco (la apertura del domingo) se ejecuta donde abrió el precio, con velas de 5 min.
+    assert risk.costs("EUR/USD") == (0.0035, 0.005)
+    p = risk.build_plan("LONG", 1.1, 0.004, 50000, symbol="EUR/USD")
+    assert abs(p["cost_est"] / p["qty"] - 1.1 * 2 * 0.0085 / 100) < 1e-15 and abs(p["risk_usd"] - 500) < 1e-6, p
+
+    class Spy(FakeMarket):
+        asked = []
+
+        async def ohlcv(self, symbol, tf, limit=300):
+            self.asked.append((symbol, tf))
+            return await super().ohlcv(symbol, tf, limit)
+
+    fm = Spy()
+    pb = PaperBroker(fm)
+    f = await pb.open("EUR/USD", "LONG", 80815.4, 1.09, 1.12, 1.1)
+    assert f["qty"] == 80815.4 and abs(f["price"] - 1.1 * 1.00005) < 1e-12, f
+    assert abs(f["fee"] - f["price"] * 80815.4 * 0.000035) < 1e-9, f
+    gap = {"symbol": "EUR/USD", "side": "LONG", "qty": 1000.0, "sl": 98.0, "tp": 104.0, "opened_ts": time.time() - 600}
+    fm.p = 95.0
+    res = await pb.check_exit(gap)
+    assert res["reason"] == "SL" and abs(res["price"] - 95.0 * (1 - 0.00005)) < 1e-9, res
+    assert fm.asked == [("EUR/USD", "5m")], fm.asked
+    fm.p = 100.0
+
+    # 4) Datos de Yahoo: EUR/USD es EURUSD=X, sin volumen, sin libro de órdenes y sin exchange que crear; los bots
+    #    de estructura piden velas de 1 h, y Wyckoff, que lee el volumen, se abstiene.
+    calls, old_symbols = [], config.SYMBOLS
+    base = int(time.time()) // 3600 * 3600 - 12 * 3600
+
+    def fake(symbol, interval, span):
+        calls.append((symbol, interval, span))
+        closes = [1.10 + i / 1000 for i in range(11)]
+        meta = 1.1095
+        if symbol == "JPYUSD=X":  # la cabecera de Yahoo viene redondeada a 4 decimales
+            closes, meta = [0.0062775] * 11, 0.0063
+        return 200, {"chart": {"result": [{"meta": {"regularMarketPrice": meta},
+                                           "timestamp": [base + 3600 * i for i in range(10)] + [int(time.time()) - 60],
+                                           "indicators": {"quote": [{
+                                               "open": closes, "close": closes, "volume": [0] * 11,
+                                               "high": [c + 0.001 for c in closes],
+                                               "low": [c - 0.001 for c in closes]}]}}]}}
+
+    real_get, exchange._yahoo_get = exchange._yahoo_get, fake
+    try:
+        config.SYMBOLS = ["EUR/USD"]
+        m = Market()
+        assert m.ex is None
+        await m.start()
+        assert calls[-1] == ("EURUSD=X", "1d", "5d"), calls
+        df = await m.ohlcv("EUR/USD", "1h", 50)
+        assert len(df) == 10 and (df.volume == 0).all() and calls[-1] == ("EURUSD=X", "1h", "1y"), (df, calls)
+        assert abs(await m.price("EUR/USD") - 1.11) < 1e-12 and calls[-1] == ("EURUSD=X", "1d", "1d")  # la última vela
+        assert abs(await m.price("JPY/USD") - 0.0062775) < 1e-12  # no la cabecera redondeada (0,0063: un 0,36 % más)
+        try:
+            await m.book_imbalance("EUR/USD")
+            raise AssertionError("las divisas no tienen libro")
+        except NotImplementedError:
+            pass
+        seen = []
+
+        class Bars:
+            async def ohlcv(self, symbol, tf, limit=300):
+                seen.append((symbol, tf))
+                return await m.ohlcv("EUR/USD", "1h", limit)
+
+        await SMCAgent().run("EUR/USD", Bars())
+        await WyckoffAgent().run("EUR/USD", Bars())
+        assert seen == [("EUR/USD", "1h"), ("EUR/USD", "1h")], seen
+        await m.close()
+    finally:
+        exchange._yahoo_get, exchange._yahoo_pause = real_get, 0.0
+        config.SYMBOLS = old_symbols
+    quiet = trend(0.0005, 240)
+    assert "sin datos de volumen" in WyckoffAgent.analyze("EUR/USD", quiet.assign(volume=0.0)).rationale
+    assert "sin datos de volumen" not in WyckoffAgent.analyze("NVDA", quiet).rationale
+
+    # 5) El jefe no entra con el mercado de divisas cerrado, lo cierra todo antes del fin de semana y, si el motor
+    #    estuvo apagado el viernes, cierra en la apertura del domingo lo que pasó el fin de semana abierto.
+    real = risk.fx_session, risk.fx_open_since, risk.fx_quoted
+    week = {"s": (False, False), "since": None, "q": False}
+    risk.fx_session = lambda now=None: week["s"]
+    risk.fx_open_since = lambda now=None: week["since"]
+    risk.fx_quoted = lambda now=None: week["q"]
+
+    def say(direction, conf):
+        for name in AGENT_LABELS:
+            db.set_state(f"signal:{name}:EUR/USD", token_budget.pack(
+                Signal(agent=name, symbol="EUR/USD", direction=direction, confidence=conf, rationale="prueba")))
+
+    try:
+        config.SYMBOLS = ["EUR/USD"]
+        for key in ("ctl:kill", "ctl:bench", "ctl:params", "order:fails", "order:last_attempt", "weights", "account"):
+            db.del_state(key)
+        db.set_state("ctl:mode", "AUTO")
+        db.set_state("ctl:auto_opt", False)
+        fm = Spy()
+        fm.asked = []
+        boss = BossAgent(fm, PaperBroker(fm), {n: 600 for n in AGENT_LABELS}, None, lambda text: None)
+        status = lambda: db.get_state("boss:EUR/USD")["status"]
+        say("LONG", 90)
+        await boss.tick()  # fin de semana: no se entra
+        assert not trade_logger.open_trades() and status().startswith("mercado de divisas cerrado"), status()
+        week["s"], week["since"], week["q"] = (True, False), time.time() - 3600, True
+        await boss.tick()
+        (t,) = trade_logger.open_trades()
+        assert t["symbol"] == "EUR/USD" and t["qty"] != int(t["qty"]), t  # fracciones, no unidades enteras
+        assert ("EUR/USD", "1h") in fm.asked and ("EUR/USD", "15m") not in fm.asked, fm.asked  # stop con velas de 1 h
+        week["s"] = (False, True)  # viernes 16:55: se cierra y no se abre otra
+        await boss.tick()
+        c = trade_logger.closed_trades(mode="divisas")[-1]
+        assert not trade_logger.open_trades() and c["exit_reason"] == "SESION", c
+        assert status().startswith("mercado de divisas cerrado"), status()
+        week["s"] = (True, False)
+        await boss.tick()
+        assert len(trade_logger.open_trades()) == 1
+        week["s"], week["since"], week["q"] = (False, False), None, False  # apagado el viernes: sin mercado no se toca
+        await boss._flatten("KILL")
+        await boss.tick()
+        assert len(trade_logger.open_trades()) == 1
+        week["since"] = time.time() + 1  # abre el domingo, pero Yahoo aún da el precio del viernes: sigue abierta
+        await boss._flatten("KILL")
+        await boss.tick()
+        assert len(trade_logger.open_trades()) == 1
+        week["q"] = True  # ya hay precio de esta semana: se cierra
+        await boss.tick()
+        assert not trade_logger.open_trades() and trade_logger.closed_trades(mode="divisas")[-1]["exit_reason"] == "SESION"
+        # Una cuenta perdida que enseñó "stop más ancho" (ATR de 4 h) también ensancha el stop de las divisas.
+        week["s"], config.ATR_TIMEFRAME, fm.asked = (True, False), "4h", []
+        await boss.tick()
+        assert ("EUR/USD", "4h") in fm.asked and len(trade_logger.open_trades()) == 1, fm.asked
+        week["s"] = (False, True)
+        await boss.tick()
+    finally:
+        risk.fx_session, risk.fx_open_since, risk.fx_quoted = real
+        config.ATR_TIMEFRAME = "15m"
+        for name in AGENT_LABELS:
+            db.del_state(f"signal:{name}:EUR/USD")
+        for key in ("ctl:auto_opt", "account"):
+            db.del_state(key)
+
+    # 6) Backtest: Yahoo con su nombre (EURUSD=X) y sin descartar las velas de volumen cero.
+    zero = {"chart": {"result": [{"timestamp": [1780000200, 1780003800], "indicators": {"quote": [
+        {"open": [1.1, 1.2], "high": [1.2, 1.3], "low": [1.0, 1.1], "close": [1.15, 1.25], "volume": [0, 0]}]}}]}}
+    assert backtest.yahoo_frame(zero).close.tolist() == [1.15, 1.25]
+    folder = pathlib.Path(TMP) / "yahoo_fx"
+    folder.mkdir()
+    stamp = pd.Timestamp.now("UTC").strftime("%Y%m%d")
+    for interval in ("1h", "1d", "5m"):
+        (folder / f"yahoo_EURUSD=X_{interval}_{stamp}.json").write_text(json.dumps(zero))
+    real_open = backtest.urllib.request.urlopen
+    backtest.urllib.request.urlopen = lambda *a, **kw: (_ for _ in ()).throw(AssertionError("no debía ir a la red"))
+    try:
+        got = backtest.yahoo("EUR/USD", folder)  # sale de los archivos guardados con el nombre de Yahoo
+    finally:
+        backtest.urllib.request.urlopen = real_open
+    assert len(got["1h"]) == 2 and len(got["1d"]) == 2
+
+    # 6b) Backtest de divisas sin reglas de fondeo: no entra fuera del horario, no pasa ningún fin de semana abierto
+    #     y un stop que salta con un hueco (los miércoles a las 12:00) se ejecuta donde abre la vela, como en vivo.
+    gen = np.random.default_rng(3)
+    keep = []
+    for ts in pd.date_range("2026-02-01", "2026-05-31", freq="1h", tz="UTC"):
+        ny = ts.tz_convert(risk.NEW_YORK)
+        h = risk.fx_hours(ny.to_pydatetime())
+        if h and ny >= h[0] + pd.Timedelta(hours=2) and ny + pd.Timedelta(hours=1) <= h[1]:
+            keep.append(ts)  # como Yahoo: de las 19:00 del domingo a las 17:00 del viernes en Nueva York
+    ts = pd.DatetimeIndex(keep)
+    drift = np.where((np.arange(len(ts)) // 240) % 2 == 0, 0.0003, -0.0003)
+    c = 1.10 * np.exp(np.cumsum(drift + gen.normal(0, 0.0012, len(ts))))
+    o = np.r_[c[0], c[:-1]]
+    for i in range(1, len(ts)):
+        ny = ts[i].tz_convert(risk.NEW_YORK)
+        if ny.weekday() == 2 and ny.hour == 12:
+            o[i] = c[i - 1] * (0.985 if (i // 240) % 2 == 0 else 1.015)
+    h1 = pd.DataFrame({"ts": ts, "open": o, "high": np.maximum(o, c) * 1.0004, "low": np.minimum(o, c) * 0.9996,
+                       "close": c, "volume": 0.0})
+    fxdata = {"EUR/USD": {"1h": h1, "4h": backtest.resample(h1, "4h"), "1d": backtest.resample(h1, "1D")}}
+    old = config.SYMBOLS, config.SMC_TIMEFRAME, config.ATR_TIMEFRAME, config.WYCKOFF_TIMEFRAME, config.FEE_PCT, \
+        config.SLIPPAGE_PCT, config.CAPITAL, config.RISK_PER_TRADE_PCT, config.MAX_LEVERAGE, config.TOTAL_LOSS_LIMIT_USD
+    config.SYMBOLS, config.SMC_TIMEFRAME, config.ATR_TIMEFRAME, config.WYCKOFF_TIMEFRAME = ["EUR/USD"], "1h", "1h", "1h"
+    config.FEE_PCT, config.SLIPPAGE_PCT, config.CAPITAL, config.RISK_PER_TRADE_PCT = 0.0035, 0.005, 50000.0, 0.4
+    config.MAX_LEVERAGE, config.TOTAL_LOSS_LIMIT_USD = 2.0, 0.0
+    try:
+        fxr = await backtest.run(fxdata, 60)
+    finally:
+        (config.SYMBOLS, config.SMC_TIMEFRAME, config.ATR_TIMEFRAME, config.WYCKOFF_TIMEFRAME, config.FEE_PCT,
+         config.SLIPPAGE_PCT, config.CAPITAL, config.RISK_PER_TRADE_PCT, config.MAX_LEVERAGE,
+         config.TOTAL_LOSS_LIMIT_USD) = old
+    tr = fxr["trades"]
+    assert len(tr) >= 20 and any(t["exit_reason"] == "SESION" for t in tr), [t["exit_reason"] for t in tr]
+    assert all(risk.fx_session(t["opened"])[0] for t in tr), [t["opened"] for t in tr if not risk.fx_session(t["opened"])[0]]
+    assert all(t["closed"] <= risk.fx_hours(t["opened"].tz_convert(risk.NEW_YORK).to_pydatetime())[1] for t in tr)
+    at = {t: i for i, t in enumerate(ts)}
+    gapped = 0
+    for t in (t for t in tr if t["exit_reason"] == "SL"):
+        b, long = h1.iloc[at[t["closed"] - pd.Timedelta(hours=1)]], t["side"] == "LONG"
+        jump = (b.open <= t["sl"]) if long else (b.open >= t["sl"])
+        gapped += jump
+        ref = b.open if jump else t["sl"]
+        assert abs(t["exit"] - ref * (1 - 0.00005 if long else 1 + 0.00005)) < 1e-12, (t, b)
+    assert gapped >= 1
+
+    # 7) Candados: las divisas solo se simulan, y el yen se escribe JPY/USD (como el futuro de Chicago).
+    run = lambda **env: subprocess.run([sys.executable, "-c", "import config; print(config.FOREX, config.STOCKS)"],
+                                       cwd=config.ROOT, env=os.environ | env, capture_output=True, text=True)
+    r = run(SYMBOLS="BTC/USDT:USDT,EUR/USD,JPY/USD")
+    assert r.returncode == 0 and "['EUR/USD', 'JPY/USD'] []" in r.stdout, r
+    r = run(SYMBOLS="EUR/USD", PAPER_TRADING="false")
+    assert r.returncode != 0 and "solo se simulan" in r.stderr, r.stderr
+    r = run(SYMBOLS="USD/JPY")
+    assert r.returncode != 0 and "JPY/USD" in r.stderr, r.stderr
+    r = run(SYMBOLS="EURUSD=X")  # el nombre de Yahoo, que si no pasaría por una acción
+    assert r.returncode != 0 and "EUR/USD" in r.stderr, r.stderr
+
+
 def check_public():
     """Datos públicos (SEC, State Street, Reserva Federal) y el laboratorio de eventos: lo que se lee de cada fuente y
     que ninguna hipótesis entra antes de que el dato sea público ni mira el futuro."""
@@ -2024,7 +2349,8 @@ def check_public():
     assert abs(sum(lab.stats(p, short, p.dates[395], p.dates[420])["years"].values()) - short.ret[0]) < 2e-4
     long_ = lab.trades_from(p, [("AAA", 400, 410, 1)], lab.BORROW)
     assert abs(long_.ret[0] - (excess(0, 1, 400, 410) - lab.COST["500"])) < 1e-12
-    assert lab.tag(1, "train") == "train.json" and lab.tag(2, "exam") == "exam2.json" and lab.EXAM_T == {1: 2.5, 2: 2.8}
+    assert lab.tag(1, "train") == "train.json" and lab.tag(2, "exam") == "exam2.json"
+    assert lab.EXAM_T == {1: 2.5, 2: 2.8, 3: 3.0}
     ok = {"n": 150, "t": 2.6, "years_pos": 3, "mean_trade": 0.001}
     assert lab.passes(ok, 1) and not lab.passes(ok, 2) and lab.passes(ok | {"t": 2.85}, 2)  # 2,8 en la segunda ronda
     assert not lab.passes(ok | {"n": 99}, 1) and not lab.passes(ok | {"years_pos": 2}, 1)
@@ -2075,6 +2401,212 @@ def check_public():
     three = lab.h7(p, sells, {"insiders": 3, "usd": 1_000_000, "hold": 21})
     assert list(two.e) == [206] and list(three.e) == [211] and set(two.side) == {-1} and two.fee_day[0] > 0, (two, three)
     assert lab.h7(p, sells.assign(value=300e3), {"insiders": 3, "usd": 1_000_000, "hold": 21}).empty  # 900.000: no
+    check_round3(lab, p, dates, names, rets, panel, excess)
+
+
+def check_round3(lab, p, dates, names, rets, panel, excess):
+    """Tercera ronda (ESTADO.md): lo que declaran los políticos y los 13F de los grandes inversores, sin red."""
+    import io
+    import zipfile
+    # 1) Congreso: cada operación con quién, cuándo se hizo y cuándo se hizo pública.
+    f = {"id": "house_nancy_pelosi", "full_name": "Nancy Pelosi", "branch": "congress", "chamber": "house",
+         "party": "D", "state": "CA"}
+    rows = public_data._congress_rows(f, [{"transaction_date": "2016-01-04", "filing_date": "2016-02-01", "ticker": " aaa ",
+                                           "asset_type": "ST", "transaction_type": "Purchase", "owner": "SP",
+                                           "amount_range_low": "1001", "amount_range_high": 15000},
+                                          {"transaction_date": None, "filing_date": None, "ticker": "BBB"}])
+    df = public_data._congress_frame(rows)
+    assert len(df) == 1 and df.ticker[0] == "AAA" and df.filed[0] == pd.Timestamp("2016-02-01") and df.usd_low[0] == 1001
+
+    # 2) 13F: suma por CUSIP, sin opciones ni bonos, miles de USD hasta 2023, y de las enmiendas solo las que añaden
+    #    posiciones que eran secretas.
+    ns = 'xmlns="http://www.sec.gov/edgar/document/thirteenf/informationtable"'
+    row = lambda cusip, sh, val, kind="SH", put="": (
+        f"<infoTable><nameOfIssuer>X</nameOfIssuer><titleOfClass>COM</titleOfClass><cusip>{cusip}</cusip>"
+        f"<value>{val}</value><shrsOrPrnAmt><sshPrnamt>{sh}</sshPrnamt><sshPrnamtType>{kind}</sshPrnamtType>"
+        f"</shrsOrPrnAmt>{f'<putCall>{put}</putCall>' if put else ''}</infoTable>")
+    table = (f"<informationTable {ns}>" + row("037833100", "1,000", 50) + row("037833100", 500, 25)
+             + row("037833100", 300, 9, put="Call") + row("38259P508", 7, 3, kind="PRN") + "</informationTable>").encode()
+    pages = {"index.json": json.dumps({"directory": {"item": [{"name": "primary_doc.xml"}, {"name": "tabla.xml"}]}}).encode(),
+             "tabla.xml": table}
+    real_fetch = public_data.fetch
+
+    def fake_fetch(url, kind="web", tries=5):
+        name = url.rsplit("/", 1)[-1]
+        if name == "primary_doc.xml":
+            return f"<edgarSubmission><amendmentInfo><amendmentType>{pages['amend']}</amendmentType></amendmentInfo></edgarSubmission>".encode()
+        return pages[name]
+
+    public_data.fetch = fake_fetch
+    try:
+        old = public_data.filing13f(1, "0001-22-1", pd.Timestamp("2022-11-14 21:00", tz="UTC"), "13F-HR")
+        assert old.cusip.tolist() == ["037833100"] and old.shares[0] == 1500 and old.value[0] == 75_000, old
+        new = public_data.filing13f(1, "0001-23-1", pd.Timestamp("2023-02-14 21:00", tz="UTC"), "13F-HR")
+        assert new.value[0] == 75, new  # desde el 03-01-2023, en USD
+        pages["amend"] = "RESTATEMENT"
+        assert public_data.filing13f(1, "0001-23-2", pd.Timestamp("2023-03-01", tz="UTC"), "13F-HR/A").empty
+        pages["amend"] = "NEW HOLDINGS"
+        assert len(public_data.filing13f(1, "0001-23-3", pd.Timestamp("2023-03-01", tz="UTC"), "13F-HR/A")) == 1
+
+        # 3) Entregas fallidas de la SEC: el símbolo que tenía cada CUSIP en esa fecha.
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("cnsfails201905a.txt", "SETTLEMENT DATE|CUSIP|SYMBOL|QUANTITY (FAILS)|DESCRIPTION|PRICE\n"
+                       "20190501|30303M102|FB|100|FACEBOOK INC|190\n20190502|30303M102|FB|50|FACEBOOK INC|191\n"
+                       "20190501|BAD|ZZ|1|X|1\nTrailer record count 3\n")
+        pages["cnsfails201905a.zip"] = buf.getvalue()
+        (public_data.DIR / "ftd").mkdir(parents=True, exist_ok=True)
+        (public_data.DIR / "ftd" / "links.json").write_text(json.dumps({"201905a": "https://x/cnsfails201905a.zip"}))
+        got = public_data.ftd_symbols("201905")
+        assert got.to_dict("records") == [{"cusip": "30303M102", "symbol": "FB"}], got
+        try:
+            public_data.ftd_symbols("201908")
+            raise AssertionError("mes sin archivo")
+        except FileNotFoundError:
+            pass
+    finally:
+        public_data.fetch = real_fetch
+
+    # 4) De CUSIP o símbolo de una fecha al ticker del panel: el CUSIP de hoy, y si no, el símbolo de entonces.
+    nm = lab.Names(["META", "BRK-B", "GOOGL", "AAA"], {"30303M102": "META", "084670702": "BRK-B", "11111111X": "OTRA"},
+                   {"201905": pd.DataFrame({"cusip": ["30303M102", "38259P508", "999999999"],
+                                            "symbol": ["FB", "GOOGL", "XYZ"]})})
+    when = pd.Timestamp("2019-05-20", tz="UTC")
+    assert nm.of_symbol("FB", when) == "META" and nm.of_symbol("BRK.B", when) == "BRK-B" and nm.of_symbol("ZZZ", when) is None
+    assert nm.of_cusip("38259P508", when) == "GOOGL" and nm.of_cusip("999999999", when) is None
+    assert nm.of_cusip("084670702", when) == "BRK-B" and nm.of_cusip("11111111X", when) is None  # fuera del panel
+    wtw = lab.Names(["WTW"], {}, {})  # hasta 2022, WTW era Weight Watchers; hoy es Willis Towers Watson
+    assert wtw.of_symbol("WTW", pd.Timestamp("2019-05-20")) is None and wtw.of_symbol("WTW", pd.Timestamp("2023-01-03")) == "WTW"
+    # El plazo del 13F: 45 días, y si cae en fin de semana o festivo federal, el siguiente día hábil.
+    assert lab.deadline13f(pd.Period("2020Q4")) == pd.Timestamp("2021-02-16")  # domingo 14 y lunes 15, festivo
+    assert lab.deadline13f(pd.Period("2015Q3")) == pd.Timestamp("2015-11-16") and lab.deadline13f(pd.Period("2014Q2")) == pd.Timestamp("2014-08-14")
+    real_congress = public_data.congress
+    public_data.congress = lambda rev=public_data.KADOA_PIN: (_ for _ in ()).throw(AssertionError("no debía llegar aquí"))
+    try:
+        for name in ("H8", "H9"):
+            try:
+                lab.inputs(p, name)  # sin el SPY ni las entregas fallidas no se pasa la tercera ronda
+                raise AssertionError("faltan datos")
+            except SystemExit:
+                pass
+    finally:
+        public_data.congress = real_congress
+
+    # 5) Cargos de dirección en su fecha.
+    assert lab.leader("house", "Nancy Pelosi", pd.Timestamp("2020-01-01")) and not lab.leader("house", "Nancy Pelosi", pd.Timestamp("2024-01-01"))
+    assert not lab.leader("senate", "Nancy Pelosi", pd.Timestamp("2020-01-01"))
+    assert lab.leader("house", "Mike Johnson", pd.Timestamp("2023-11-01")) and not lab.leader("house", "Dusty Johnson", pd.Timestamp("2024-01-01"))
+
+    # 6) H8: compras de acciones, la primera declaración de cada una, la entrada al cierre de la sesión siguiente a la
+    #    declaración, y las variantes de líderes y de empresas de su estado.
+    d = lambda i: p.dates[i]
+    raw = pd.DataFrame([
+        ("house_nancy_pelosi", "Nancy Pelosi", "house", "CA", d(100), d(120), "AAA", "Apple", "ST", "Purchase", "SP", 1001),
+        ("house_nancy_pelosi", "Nancy Pelosi", "house", "CA", d(100), d(130), "AAA", "Apple", "ST", "Purchase", "JT", 15001),
+        ("house_nancy_pelosi", "Nancy Pelosi", "house", "CA", d(102), d(132), "AAB", "Purchase of 20 call options (AAB) [ST]",
+         "ST", "Purchase", "SP", 1001),
+        ("house_x", "Joe X", "house", "TX", d(140), d(150), "CCD", "iShares Core S&P 500 (IVV) [ST]", "ST", "Purchase", "",
+         1001),
+        ("house_x", "Joe X", "house", "TX", d(200), d(210), "BBB", "Bee (BBB) [sT]", "", "Purchase", "", 1001),
+        ("house_x", "Joe X", "house", "TX", d(220), d(230), "CCC", "Cee 10 calls", "", "Purchase", "", 1001),
+        ("house_x", "Joe X", "house", "TX", d(240), d(250), "CCD", "Dee", "OP", "Purchase", "", 1001),
+        ("house_x", "Joe X", "house", "TX", d(260), d(270), "AAB", "Abe", "ST", "Sale (Full)", "", 1001),
+        ("senate_y", "Ann Y", "senate", "NY", d(300), d(310), "BBC", "Bc", "Stock", "Purchase", "Self", 15001),
+    ], columns=["filer", "name", "chamber", "state", "traded", "filed", "ticker", "asset", "asset_type", "kind", "owner",
+                "usd_low"])
+    real = public_data.congress, public_data.ciks, public_data.states
+    public_data.congress = lambda rev=public_data.KADOA_PIN: raw
+    public_data.ciks = lambda days=30: {t: k + 1 for k, t in enumerate(names)}
+    public_data.states = lambda cik_list, days=365: {1: "CA", 2: "CA", 3: "NY", 4: "NY", 5: "TX", 6: "TX"}
+    try:
+        buys = lab.congress_buys(p, lab.Names(names, {}, {}))
+    finally:
+        public_data.congress, public_data.ciks, public_data.states = real
+    # Fuera: la misma compra redeclarada con otro titular e importe, las opciones con código de acción y el fondo
+    # (IVV) que la ficha apuntaba con el ticker de la cuenta (CCD).
+    assert buys.t.tolist() == ["AAA", "BBB", "BBC"] and buys.filed.tolist() == [d(120), d(210), d(310)], buys
+    assert buys.leader.tolist() == [True, False, False]  # en 2015 Pelosi era la líder de la minoría
+    assert buys.home.tolist() == [True, False, True]  # Pelosi (CA) compra AAA (CA); Ann Y (NY), BBC (NY)
+    every = lab.h8(p, buys, {"who": "all", "hold": 63})
+    assert every.e.tolist() == [121, 211, 311] and every.x.tolist() == [184, 274, 374], every
+    assert lab.h8(p, buys, {"who": "home", "hold": 250}).ticker.tolist() == ["AAA", "BBC"]
+    assert lab.h8(p, buys, {"who": "leaders", "hold": 250}).ticker.tolist() == ["AAA"]
+
+    # 7) H9: los 13F de los gestores, con su fecha pública (la última de sus CIK) y el puesto de cada posición.
+    q2, q3 = pd.Timestamp("2015-06-30"), pd.Timestamp("2015-09-30")
+    acc = lambda day: pd.Timestamp(day, tz="UTC") + pd.Timedelta(hours=21)  # a las 16:00/17:00 de Nueva York
+
+    def filing(period, accepted, pos, amendment=False, accession=None, size=10):
+        fill = [(f"FILL{i:05d}", 1.0) for i in range(size - len(pos))] if not amendment else []  # posiciones sin ticker
+        return pd.DataFrame([{"cusip": c, "issuer": "", "title": "COM", "shares": 1.0, "value": v,
+                              "accession": accession or f"{period:%Y%m}-{accepted:%m%d}", "accepted": accepted,
+                              "period": period, "amendment": amendment} for c, v in pos + fill])
+
+    B = lab.BERKSHIRE
+    q4 = pd.Timestamp("2015-12-31")
+    books = {1: pd.concat([filing(q2, acc("2015-08-14"), [("C-AAA", 100), ("C-BBB", 50), ("Z99999AA1", 40)]),
+                           filing(q3, acc("2015-11-13"), [("C-AAA", 120), ("C-BBB", 50), ("C-CCC", 10), ("Z99999BB2", 40)]),
+                           filing(q4, acc("2016-02-16"), [("C-AAA", 120), ("C-BBB", 50), ("C-CCC", 10), ("Z99999BB2", 40)]),
+                           filing(q3, acc("2015-12-15"), [("C-CCD", 30)], amendment=True)]),
+             2: pd.concat([filing(q2, acc("2015-08-13"), [("C-BBC", 90)]),
+                           filing(q3, acc("2015-11-12"), [("C-AAA", 80), ("C-BBC", 90)]),
+                           filing(q4, acc("2016-02-16"), [("C-AAA", 80), ("C-BBC", 90)])]),
+             3: pd.concat([filing(q3, acc("2015-11-13"), [("C-AAA", 70), ("C-BBB", 5)]),
+                           filing(q3, acc("2015-11-14"), [("C-CCD", 200)], accession="otro original"),  # repetido
+                           filing(q4, acc("2016-02-16"), [("C-AAA", 70), ("C-BBB", 5)])]),
+             4: pd.concat([filing(q3, acc("2015-11-17"), [("C-AAA", 60), ("C-BBB", 6)])]),  # después del plazo
+             5: pd.concat([filing(q2, acc("2015-08-13"), [("C-BBC", 50)], size=5),  # solo 5 posiciones
+                           filing(q3, acc("2015-11-13"), [("C-AAA", 50), ("C-CCD", 40)], size=5)])}
+    real = public_data.MANAGERS, public_data.holdings13f, lab._adj_at
+    public_data.MANAGERS = {B: (1,), "M2": (2,), "M3": (3,), "M4": (4,), "M5": (5,)}
+    public_data.holdings13f = lambda cik, days=7: books[cik]
+    lab._adj_at = lambda t, day: 1.0
+    try:
+        nm6 = lab.Names(names, {f"C-{t}": t for t in names} | {"Z99999BB2": "BBC"}, {})  # BBC cambió de CUSIP
+        orig, amend = lab.fund_frames(p, nm6)
+        assert set(orig.n) == {10, 5} and len(amend) == 1 and amend.t[0] == "CCD", (orig, amend)  # el repetido no cuenta
+        e = lambda day: p.after(pd.Timestamp(day))
+        b1 = lab.h9(p, (orig, amend), {"who": "berkshire", "grow": 0.10, "hold": 252})
+        assert sorted(zip(b1.ticker, b1.e)) == [("AAA", e("2015-11-13")), ("CCC", e("2015-11-13")), ("CCD", e("2015-12-15"))], b1
+        lab._adj_at = lambda t, day: 2.0 if day >= q3 else 1.0  # el precio ajustado se dobló: con un split, no crece
+        b1 = lab.h9(p, (orig, amend), {"who": "berkshire", "grow": 0.10, "hold": 252})
+        assert "AAA" not in set(b1.ticker) and "CCC" in set(b1.ticker), b1
+        # Consenso: AAA está entre las 10 mayores de Berkshire, M2 y M3 antes del plazo (14-11); M4 llegó tarde.
+        cons = lab.h9(p, (orig, amend), {"who": "consensus", "min": 3, "hold": 63})
+        # Plazo del tercer trimestre en sábado: el lunes 16. AAA sigue en el consenso del cuarto (plazo el martes 16-02,
+        # tras el festivo del lunes). A 63 sesiones la primera ya se cerró y se vuelve a comprar; a 70, sigue abierta y
+        # la misma posición se alarga 70 sesiones desde esa revisión, sin pagar otra entrada.
+        assert cons.ticker.tolist() == ["AAA", "AAA"] and cons.e.tolist() == [e("2015-11-16"), e("2016-02-16")], cons
+        assert cons.x.tolist() == [e("2015-11-16") + 63, e("2016-02-16") + 63], cons
+        longer = lab.h9(p, (orig, amend), {"who": "consensus", "min": 3, "hold": 70})
+        assert longer.e.tolist() == [e("2015-11-16")] and longer.x.tolist() == [e("2016-02-16") + 70], longer
+        assert lab.h9(p, (orig, amend), {"who": "consensus", "min": 4, "hold": 63}).empty  # M5 (5 posiciones) no cuenta
+        # Un CUSIP nuevo de un emisor que ya estaba (cambio de CUSIP, otra clase) no es una apuesta nueva.
+        prev = pd.DataFrame({"t": ["AAA", None], "cusip": ["111111AA1", "222222BB2"]})
+        now = pd.DataFrame({"t": ["AAA", "BBB", "CCC"], "cusip": ["111111AA1", "222222CC3", "333333DD4"]})
+        assert lab.is_new(now, lab.held(prev)).tolist() == [False, False, True]
+        # Apuestas nuevas: AAA entra entre las 10 mayores de M2, que no la tenía; BBC ya la tenía.
+        fresh = lab.h9(p, (orig, amend), {"who": "new_top10", "hold": 63})
+        # M5 tiene solo 5 posiciones y también cuenta: CCD es nueva entre las suyas (su AAA llega con AAA ya comprada).
+        assert sorted(zip(fresh.ticker, fresh.e)) == [("AAA", e("2015-11-12")), ("CCC", e("2015-11-13")),
+                                                      ("CCD", e("2015-11-13"))], fresh
+    finally:
+        public_data.MANAGERS, public_data.holdings13f, lab._adj_at = real
+
+    # 8) Contra el SPY y sin las 3 acciones que más aportan; aprobado de la tercera ronda.
+    spy = np.full(len(dates), 0.001)
+    ps = object.__new__(lab.Panel).build(dates, names, rets, np.ones(rets.shape, bool), p.grp, p.group, p.cik, spy)
+    one = lab.trades_from(ps, [("AAA", 400, 410, 1)])
+    vs = lab.stats(ps, one, ps.dates[395], ps.dates[420], vs_spy=True)
+    expect = np.nansum(rets[401:411, 0]) - 0.010 - lab.COST["500"]
+    assert abs(sum(vs["years"].values()) - expect) < 2e-4, (vs, expect)  # los años van redondeados a 4 decimales
+    top = pd.DataFrame({"ticker": list("ABCDD"), "ret": [0.10, 0.05, 0.03, -0.01, -0.02]})
+    assert abs(lab.without_top(top) - (-0.015)) < 1e-12 and lab.without_top(top.iloc[:0]) == 0.0
+    ok3 = {"n": 150, "t": 3.1, "years_pos": 3, "mean_trade": 0.001}
+    assert lab.passes(ok3, 3, {"t": 1.7}, 0.001) and not lab.passes(ok3, 3) and not lab.passes(ok3 | {"t": 2.9}, 3, {"t": 1.7}, 0.001)
+    assert not lab.passes(ok3, 3, {"t": 1.6}, 0.001) and not lab.passes(ok3, 3, {"t": 1.7}, -0.001)
+    assert lab.confirms(ok3, {"monthly_mean": 0.001}) and not lab.confirms(ok3, {"monthly_mean": -0.001})
+    assert lab.passes(ok3 | {"t": 2.6}, 1)  # las rondas anteriores no cambian
 
 
 def check_prop():
@@ -2113,7 +2645,7 @@ def check_prop():
 if __name__ == "__main__":
     checks = [check_cache, check_risk, check_agents, check_boss_decision, check_lifecycle, check_evolution,
               check_tokens_and_alerts, check_ccxt_broker, check_macro, check_optimizer, check_app, check_orb,
-              check_backtest, check_alpaca, check_topstepx, check_funded, check_scenarios, check_public,
+              check_backtest, check_alpaca, check_topstepx, check_funded, check_fx, check_scenarios, check_public,
               check_prop]
     names = [c.__name__[6:] for c in checks]
     wanted = set(sys.argv[1:])  # sin argumentos, todas; `selfcheck.py optimizer app` ejecuta solo esas dos
@@ -2144,5 +2676,6 @@ if __name__ == "__main__":
         print("selfcheck OK: caché, riesgo y costes, 6 agentes, jefe, ciclo completo de operación, evolución "
               "(muerte, mutación, persistencia), tokens, alertas, broker CCXT, macro, recompensas y optimizador, "
               "controles de la app, ORB, backtest con validación fuera de muestra, datos de Alpaca, TopstepX "
-              "(API falsa local, kill switch, sesión y frecuencia), acciones con Yahoo, cuenta de fondeo simulada, bot de escenarios "
+              "(API falsa local, kill switch, sesión y frecuencia), acciones y divisas con Yahoo, cuenta de fondeo simulada, "
+              "bot de escenarios "
               "y datos públicos (SEC, Reserva Federal, BLS) con su laboratorio y las reglas de las cuentas de fondeo reales")

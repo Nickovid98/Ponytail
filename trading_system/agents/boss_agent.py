@@ -21,6 +21,10 @@ log = logging.getLogger("boss")
 SIGN = {"LONG": 1, "SHORT": -1, "NEUTRAL": 0}
 
 
+def _seconds(tf: str) -> int:
+    return int(tf[:-1]) * {"m": 60, "h": 3600, "d": 86400}[tf[-1]]
+
+
 class Decision(BaseModel):
     symbol: str
     action: Direction
@@ -140,10 +144,14 @@ class BossAgent:
         else:
             # Acciones: se cierran en los últimos minutos de la sesión de Nueva York (cripto sigue abierta). Lo que
             # siga abierto de una sesión anterior (el motor estaba apagado al cierre) se cierra en cuanto abre la bolsa,
-            # a precio de ahora: con la bolsa cerrada no hay precio al que cerrar.
+            # a precio de ahora: con la bolsa cerrada no hay precio al que cerrar. Divisas: igual, con la semana
+            # (cierran el viernes antes de las 17:00 de Nueva York; lo que pasara el fin de semana, en cuanto Yahoo da
+            # precios de la semana nueva: hasta entonces _flatten no las toca).
             closing, since = risk.nyse_session()[1], risk.nyse_open_since()
-            await self._flatten("SESION", only=lambda t: risk.is_stock(t["symbol"]) and (
-                closing or (since is not None and t["opened_ts"] < since)))
+            fx_closing, fx_since = risk.fx_session()[1], risk.fx_open_since()
+            await self._flatten("SESION", only=lambda t: (risk.is_stock(t["symbol"]) and (
+                closing or (since is not None and t["opened_ts"] < since))) or (risk.is_fx(t["symbol"]) and (
+                fx_closing or (fx_since is not None and t["opened_ts"] < fx_since))))
         lost = fund.get("lost") and f"cuenta {fund['gen']} perdida: se cierra lo que queda abierto" if fund else None
         blocked = (kill.get("reason") or "kill switch activado") if kill.get("on") \
             else lost or db.get_state(f"halt:{mode}:{today}") or (None if allow_entries else "fuera del horario de entradas")
@@ -202,7 +210,9 @@ class BossAgent:
         # ponytail: el relevo hereda los pesos que el optimizador ya recalcula tras cada cierre, no los del
         # backtest (fijos por generación). Techo: el umbral y el riesgo de la lección viven en los ajustes de la app
         # y el operador puede deshacerlos; entonces el panel anuncia una lección que ya no se aplica.
-        new = successor(bot, mine, trade_logger.closed_trades(mode=mode), set(STOP_TFS), time.time())
+        # ponytail: con las reglas fijas (evidence=False) hasta que la comparación de ESTADO.md ("Relevo con pruebas,
+        # divisas y copiar a políticos y fondos", A) diga si el relevo con pruebas pierde menos.
+        new = successor(bot, mine, trade_logger.closed_trades(mode=mode), set(STOP_TFS), time.time(), evidence=False)
         net = sum(t["pnl"] for t in mine)
         # Primero la cuenta nueva: si el programa se cae a mitad, el relevo y su lección no se repiten.
         db.set_state("fund", {"gen": fund["gen"] + 1, "born": time.time(), "base": trade_logger.realized_pnl(),
@@ -250,6 +260,8 @@ class BossAgent:
             return f"bloqueado: {blocked}", None
         if risk.is_stock(d.symbol) and not risk.nyse_session()[0]:
             return "bolsa de Nueva York cerrada o fuera del horario de entradas", None
+        if risk.is_fx(d.symbol) and not risk.fx_session()[0]:
+            return "mercado de divisas cerrado o fuera del horario de entradas", None
         fund = db.get_state("fund", {}) if config.FUNDED else {}
         if [d.symbol, d.action] in fund.get("blocked", []):
             return f"vetado por la cuenta {fund['gen']}: {d.action} en {d.symbol} perdía", None
@@ -270,7 +282,9 @@ class BossAgent:
             return "espera mínima entre órdenes", None
 
         price = await self.market.price(d.symbol)
-        atr_tf = config.STOCK_TIMEFRAME if risk.is_stock(d.symbol) else config.ATR_TIMEFRAME  # acciones: velas de 1 h
+        # Acciones y divisas: velas de 1 h, o las del stop más ancho si una cuenta perdida lo enseñó (como el backtest).
+        atr_tf = max(config.STOCK_TIMEFRAME, config.ATR_TIMEFRAME, key=_seconds) if risk.on_yahoo(d.symbol) \
+            else config.ATR_TIMEFRAME
         atr_v = risk.atr(await self.market.ohlcv(d.symbol, atr_tf, 100))
         plan = risk.build_plan(d.action, price, atr_v, equity, self._structure(d, price), symbol=d.symbol)
         if plan is None:
@@ -354,13 +368,14 @@ class BossAgent:
 
     async def _flatten(self, reason: str, only=None) -> None:
         """Cierra lo abierto; con `only`, solo las operaciones para las que only(operación) es cierto. Con la
-        bolsa de Nueva York cerrada las acciones no se tocan (no hay precio al que cerrarlas): se cierran en la
-        apertura, y mientras tanto una cuenta perdida sigue sin operar."""
-        nyse_closed = risk.nyse_open_since() is None
+        bolsa de Nueva York cerrada las acciones no se tocan (no hay precio al que cerrarlas), ni las divisas sin
+        precio al día (fin de semana y primeras horas del domingo): se cierran cuando lo hay, y mientras tanto una
+        cuenta perdida sigue sin operar."""
+        nyse_closed, fx_closed = risk.nyse_open_since() is None, not risk.fx_quoted()
         for t in trade_logger.open_trades():
             if only and not only(t):
                 continue
-            if nyse_closed and risk.is_stock(t["symbol"]):
+            if (nyse_closed and risk.is_stock(t["symbol"])) or (fx_closed and risk.is_fx(t["symbol"])):
                 continue
             try:
                 self._close(t, await self.broker.close(t), reason)

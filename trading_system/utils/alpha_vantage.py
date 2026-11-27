@@ -16,6 +16,7 @@ import requests
 import config
 from utils import cache_manager as cache
 from utils import db
+from utils import risk_manager as rm
 
 log = logging.getLogger("news")
 _av_lock = asyncio.Lock()
@@ -33,7 +34,8 @@ async def _av_news(symbol: str) -> list[dict]:
     global _av_last
     if not config.ALPHAVANTAGE_API_KEY:
         return []
-    ticker = "CRYPTO:" + symbol.split("/")[0] if "/" in symbol else symbol  # las acciones van con su símbolo: NVDA
+    ticker = ("FOREX:" + symbol[:3] if rm.is_fx(symbol) else "CRYPTO:" + symbol.split("/")[0]) if "/" in symbol \
+        else symbol  # las acciones van con su símbolo: NVDA; EUR/USD es FOREX:EUR
     key = f"av_news:{ticker}"
     hit = cache.cache_get(key)
     if hit is not None:
