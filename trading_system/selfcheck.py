@@ -831,16 +831,6 @@ async def check_backtest():
     assert "Linaje:" in backtest.report(lin, 4, False)
     same = (await backtest.run(data, 4, lineage={"max_loss": 30, "learn": False}))["lineage"]["generations"]
     assert len(same) >= 2 and len({str(params(x)) for x in same}) == 1  # sin aprendizaje, el sucesor es idéntico
-    assert all(isinstance(t["score"], float) for t in lin["trades"])  # el umbral de cada lección se repasa con esto
-    looked, real_evidence = [], backtest._evidence
-    backtest._evidence = lambda *a, **kw: looked.append(1)  # ¿busca pruebas cada relevo?
-    try:
-        fixed = (await backtest.run(data, 4, lineage={"max_loss": 30, "learn": "rules"}))["lineage"]["generations"]
-        assert len(fixed) >= 2 and not looked  # con "rules", solo las reglas fijas
-        await backtest.run(data, 4, lineage={"max_loss": 30})
-        assert looked  # por defecto, con pruebas
-    finally:
-        backtest._evidence = real_evidence
     config.FEE_PCT = 0.075
 
     # Las cinco correcciones del sucesor, una por causa de muerte y en este orden de prioridad.
@@ -862,50 +852,6 @@ async def check_backtest():
         born(b, losing)  # sin más filtros: arriesga menos
         assert config.RISK_PER_TRADE_PCT == 0.75 and config.DECISION_THRESHOLD == 0.75
 
-        # Con pruebas de dos periodos (la cuenta perdida y las anteriores) gana la corrección que habría ahorrado más
-        # en el peor de los dos; lo que solo pasó en uno no es una lección.
-        config.DECISION_THRESHOLD = 0.25
-        ids = iter(range(1, 1000))
-        tr = lambda side, pnl, score, n: [{"symbol": SYM, "side": side, "pnl": pnl, "fees": 1.0, "slippage": 0.0,
-                                          "risk": 100.0, "votes": {}, "score": score, "id": next(ids)} for _ in range(n)]
-        old = tr("SHORT", -20, -0.3, 6) + tr("LONG", 5, 0.6, 6)
-        dead = tr("SHORT", -30, -0.3, 6) + tr("LONG", 5, 0.6, 6)
-        b = backtest.successor(bot0, dead, old + dead, tfs, None)
-        assert b["blocked"] == {(SYM, "SHORT")} and "se habría ahorrado 180 en 6 operaciones de esta cuenta y 120 en 6 " \
-            "de las anteriores" in b["lesson"], b
-        assert config.DECISION_THRESHOLD == 0.25
-        lucky = tr("SHORT", 25, -0.3, 6) + tr("LONG", 5, 0.6, 6)  # antes los cortos ganaban: no hay prueba
-        b = backtest.successor(bot0, dead, lucky + dead, tfs, None)
-        assert b["blocked"] == {(SYM, "SHORT")} and "se habría ahorrado" not in b["lesson"] and "perdió" in b["lesson"], b
-        noisy = tr("SHORT", -40, -0.3, 3) + tr("SHORT", 35, -0.3, 3) + tr("LONG", 5, 0.6, 6)  # antes, ni gana ni pierde
-        b = backtest.successor(bot0, dead, noisy + dead, tfs, None)
-        assert "se habría ahorrado" not in b["lesson"], b  # media -2,5 con mucha dispersión: no es prueba
-        config.DECISION_THRESHOLD = 0.35  # ya subido por una cuenta anterior, cuyas operaciones de 0,30 perdían
-        stale_old = tr("LONG", -10, 0.30, 6) + tr("LONG", 5, 0.6, 6)
-        stale = tr("LONG", -1, 0.37, 5) + tr("LONG", 5, 0.6, 6)
-        b = backtest.successor(bot0, stale, stale_old + stale, tfs, None)
-        assert "se habría ahorrado" not in b["lesson"], b  # lo que el umbral de ahora ya quita no es prueba
-        config.DECISION_THRESHOLD = 0.75  # sin umbrales que probar y con un solo activo con su corto vetado:
-        assert backtest._evidence(tr("LONG", -9, 0.8, 6), tr("LONG", -9, 0.8, 6), {(SYM, "SHORT")}) is None  # no veta el último
-        config.DECISION_THRESHOLD = 0.25
-        few = tr("SHORT", -50, -0.3, 3) + tr("LONG", 5, 0.6, 6)  # solo 3 cortos en la cuenta perdida: no basta
-        b = backtest.successor(bot0, few, old + few, tfs, None)
-        assert "se habría ahorrado" not in b["lesson"] and b["blocked"] == set(), b
-        config.DECISION_THRESHOLD = 0.25
-        # Las de poco acuerdo pierden en los dos periodos, en largos y en cortos: sube el umbral lo justo para quitarlas.
-        weak = lambda: tr("LONG", -10, 0.3, 6) + tr("LONG", 8, 0.6, 6) + tr("SHORT", -5, -0.28, 6)
-        old, dead = weak(), weak()
-        b = backtest.successor(bot0, dead, old + dead, tfs, None)
-        assert config.DECISION_THRESHOLD == 0.35 and b["blocked"] == set() and "umbral 0.35" in b["lesson"], b
-        config.DECISION_THRESHOLD = 0.25
-        b = backtest.successor(bot0, dead, old + dead, tfs, None, evidence=False)  # las reglas fijas de antes
-        assert config.DECISION_THRESHOLD == 0.25 and b["blocked"] == {(SYM, "SHORT")}, b
-        # En la primera muerte no hay cuentas anteriores: las dos mitades de la cuenta hacen de dos periodos.
-        b = backtest.successor(bot0, weak() + weak(), [], tfs, None)
-        assert config.DECISION_THRESHOLD == 0.35 and "segunda mitad" in b["lesson"], b
-        config.DECISION_THRESHOLD = 0.25
-        b = backtest.successor(bot0, dead + lucky, [], tfs, None)  # los cortos perdían en la 1.ª mitad y ganaban en la 2.ª
-        assert "se habría ahorrado" not in b["lesson"], b
     finally:
         config.DECISION_THRESHOLD, config.ATR_TIMEFRAME, config.RISK_PER_TRADE_PCT = before
     only_long = await backtest.run(data, 4, lineage={"max_loss": 1e9, "blocked": [(SYM, "SHORT")]})

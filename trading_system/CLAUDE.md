@@ -66,7 +66,7 @@ app orb backtest alpaca topstepx funded fx scenarios public prop`. Solo `backtes
 | `utils/trade_logger.py` | operaciones, genealogía y bitácora (`events`) en SQLite | `log_close`, `log_event`, `events` |
 | `utils/db.py` | SQLite y el estado compartido `kv` | `get_state`, `set_state`, `del_state` |
 | `utils/token_budget.py` | tope diario de tokens y auditoría de cada llamada a Claude | `llm_allowed`, `record_llm` |
-| `backtest.py` | simulación vela a vela, cuenta fondeada por generaciones (relevo con pruebas; `--rules`, solo reglas fijas), examen fuera de muestra | `run`, `successor`, `_evidence`, `fold`, `walk_forward`, `yahoo`, `export` |
+| `backtest.py` | simulación vela a vela, cuenta fondeada por generaciones, examen fuera de muestra | `run`, `successor`, `fold`, `walk_forward`, `yahoo`, `export` |
 | `scenario_exam.py` | examen fuera de muestra del bot de escenarios (cripto 2 años por CCXT, acciones 60 días por Yahoo) | `crypto_bets`, `stock_bets`, `chosen`, `report` |
 | `utils/public_data.py` | datos públicos sin clave: SEC (resultados, formularios 4, tamaño, 13F, entregas fallidas), State Street, Reserva Federal, BLS, Yahoo, lo que declaran los políticos (Kadoa) | `universe`, `filings`, `earnings`, `insider`, `floats`, `daily`, `hourly`, `calendar`, `congress`, `holdings13f`, `MANAGERS`, `cusips`, `ftd_symbols` |
 | `event_lab.py` | laboratorio de H1-H9 con datos públicos (protocolo en `ESTADO.md`): `download`, `train`, `exam`, `holdout` (`--round 2` para H5-H7, `--round 3` para H8 políticos y H9 13F) | `Panel`, `clean`, `pit_groups`, `h1`-`h9`, `Names`, `congress_buys`, `fund_frames`, `stats`, `passes` |

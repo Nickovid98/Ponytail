@@ -420,14 +420,10 @@ costes, veto al par activo/lado que más perdió, umbral más alto y, por últim
 menos riesgo por operación. `--flat` cierra todo al final de cada sesión y no
 entra en la última media hora (acciones). El informe da el resultado por semana.
 
-Desde el 26-11, antes de esas reglas fijas, el sucesor busca pruebas en dos
-periodos: la cuenta perdida y todas las anteriores (en la primera muerte, sus dos
-mitades). Prueba a vetar cada par activo/lado o a subir el umbral, solo con lo que
-la configuración de ahora aún operaría, y la corrección vale si en los dos
-periodos habría quitado al menos 5 operaciones que pierden de verdad (media
-negativa con t ≥ 2). `--rules` usa solo las reglas fijas, para comparar las dos
-formas (`ESTADO.md`, "Relevo con pruebas"); el motor en vivo sigue con las reglas
-fijas hasta que esa comparación decida.
+El 27-11 se probó elegir la corrección con pruebas de dos periodos (la cuenta
+perdida y las anteriores): en cripto perdió más y perdió más cuentas que estas
+reglas fijas, y en acciones y divisas hizo lo mismo. Se quitó (`ESTADO.md`,
+"Relevo con pruebas").
 
 Cada bot solo aprende del pasado, así que el recorrido completo es una prueba
 honesta de si el aprendizaje sirve. Deja de serlo si se cambian las reglas y se

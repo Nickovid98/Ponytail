@@ -725,7 +725,8 @@ def watch_congress() -> None:
         "Acción": view.ticker, "Qué": view.kind.map(kinds).fillna(view.kind),
         "Importe (USD)": [f"{lo:,.0f}–{hi:,.0f}" if lo == lo and hi == hi else "" for lo, hi in zip(view.usd_low, view.usd_high)],
         "Días en declararla": (view.filed - view.traded).dt.days}), hide_index=True, width="stretch", height=320)
-    top = view[view.kind == "Purchase"].groupby("ticker").name.nunique().sort_values(ascending=False).head(10)
+    top = view[(view.kind == "Purchase") & (view.ticker != "")].groupby("ticker").name.nunique() \
+        .sort_values(ascending=False).head(10)  # sin las declaraciones que no traen ticker
     if len(top):
         st.caption("Las más compradas en ese periodo, por número de políticos distintos: "
                    + ", ".join(f"{t} ({n})" for t, n in top.items()))

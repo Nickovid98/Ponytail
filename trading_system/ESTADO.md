@@ -1,6 +1,6 @@
 # Estado del proyecto
 
-Actualizado el 25-11-2026. Quien cierre una tarea actualiza este archivo en el mismo commit.
+Actualizado el 27-11-2026. Quien cierre una tarea actualiza este archivo en el mismo commit.
 
 ## En una pantalla
 
@@ -11,12 +11,16 @@ Actualizado el 25-11-2026. Quien cierre una tarea actualiza este archivo en el m
 - **Qué funciona.** El motor (cinco bots, jefe, riesgo, selección natural), la app local, el simulador con cuenta
   fondeada y examen fuera de muestra, y el modo Topstep contra una API falsa. Desde el 16-11, además, la cuenta de
   fondeo simulada en vivo (`Iniciar cuenta de fondeo.bat`): 50.000, cripto y las siete acciones del usuario con
-  precios de Yahoo, en largo y en corto, con relevo de cuenta. `selfcheck.py` pasa entero.
+  precios de Yahoo, en largo y en corto, con relevo de cuenta. Desde el 27-11 opera también EUR/USD, GBP/USD y
+  JPY/USD, y la app enseña lo que declaran los políticos y los 13F de 26 grandes inversores (pestaña "Políticos y
+  fondos"). `selfcheck.py` pasa entero.
 - **Qué dice la investigación.** Con precios reales y después de costes, nada de lo probado gana dinero en datos
   que no había visto. No hay ventaja demostrada. Los objetivos del usuario no se han alcanzado en ninguna
   simulación. Tampoco con datos oficiales de la SEC (resultados, compras de directivos y tamaño de cada empresa en
   cada fecha): el 23 y el 24-11 se examinaron 7 ideas publicadas en dos rondas y ninguna pasó, y el bot de
-  escenarios suspendió el 19-11.
+  escenarios suspendió el 19-11. El 27-11 suspendieron también copiar a los políticos y a los grandes inversores
+  (tercera ronda), los bots en divisas (pierden ya antes de costes) y un relevo que elige la corrección con pruebas
+  (perdió más en cripto; se quitó).
 - **Activado el 23-11 (simulación).** El bot Macro veta entradas 30 minutos antes y después de cada anuncio de la
   Reserva Federal y de cada IPC y dato de empleo de la BLS. Se encendió el motor de la cuenta de fondeo.
 - **Recomendación dada al usuario.** No poner dinero ni pagar una evaluación de fondeo con este bot. Elegir entre
@@ -32,6 +36,10 @@ Actualizado el 25-11-2026. Quien cierre una tarea actualiza este archivo en el m
   retirar dinero por lo menos una semana, intentar retirar minimo entre 500 a 1000 dolares semanales, no importa que
   la cuenta muera en una semana". Es decir: pagar una evaluación, pasarla y cobrar 500–1.000 en una o dos semanas.
   Las cifras de ese plan están en "Cobrar rápido en una cuenta de fondeo".
+  El 26-11 pidió que, al perder la cuenta, nazcan bots nuevos que aprendan de los errores de los anteriores y
+  optimicen el sistema; poder ver lo que invierten los políticos de EE. UU., millonarios y fondos, y saber si
+  copiarlos es buena idea; y operar también el euro contra el dólar y otras divisas. Lo hecho y sus cifras, en
+  "Relevo con pruebas, divisas y copiar a políticos y fondos".
 - **Sus límites para dinero propio.** Capital 3.550, pérdida total 500, stop ≤ 5 %, riesgo 1 % (techo 2 %).
 - **Sus acciones.** NVDA, META, GOOGL, TTWO, MU, MSFT, UBER.
 - **Topstep.** Ahora mismo no tiene cuenta. El modo está hecho y sin probar contra el servicio real.
@@ -82,6 +90,8 @@ switch o el suelo (esto último no lo hace el backtest).
 6. ¿Sigue queriendo instalar en su PC los programas de los que dependen algunas skills (Strix, agent-reach, el
    plugin de claude-mem)? Lo pidió el 11-11 y desde la nube no se pudo; lo que necesita cada una está en
    `.claude/skills/README.md`.
+7. ¿Mantener EUR/USD, GBP/USD y JPY/USD en la cuenta de fondeo simulada? Las pidió el 26-11 y en la prueba del 27-11
+   pierden ya antes de costes. Siguen activas hasta que diga otra cosa.
 
 ## Examen del bot de escenarios (19-11, escrito antes de ver ningún resultado)
 
@@ -465,6 +475,25 @@ lanzarlas.
   - **Datos ya vistos:** el año de acciones y el de cripto ya se vieron con el relevo de reglas fijas (11 a 14-11).
     Solo las divisas son datos nuevos.
   - **El motor en vivo sigue con las reglas fijas** hasta que esta comparación decida.
+- **Resultado (27-11): el relevo con pruebas suspende y se quitó su código.** Código probado en el commit 914598f,
+  guardado antes de ver ningún resultado. Simulaciones de cuenta fondeada (50.000, 200 de riesgo, pérdida máxima
+  2.000), cada forma con su propio comando y el mismo día UTC:
+
+  | Mercado | Forma | Ops | Neto | Bruto | Neto por op | Acierto | Cuentas perdidas | Semana media |
+  |---|---|---|---|---|---|---|---|---|
+  | Acciones (7), 1 año | las dos, iguales | 495 | −2.168 | +1.035 | −4,4 | 48 % | 3 | −41 |
+  | Divisas (3), 2,6 años | las dos, iguales | 237 | −6.118 | −2.846 | −25,8 | 32 % | 4 | −45 |
+  | Cripto (BTC, ETH), 1 año | con pruebas | 218 | −12.188 | −5.108 | −55,9 | 28 % | 6 | −230 |
+  | Cripto (BTC, ETH), 1 año | reglas fijas | 147 | −9.267 | −4.309 | −63,0 | 27 % | 4 | −175 |
+
+  - **Acciones y divisas: empate.** En ninguna muerte encontró una lección que se sostuviera en los dos periodos, y
+    usó las mismas reglas fijas. Según lo escrito antes, un empate no cuenta.
+  - **Cripto, el único mercado con diferencias: pierde 2.921 más y 2 cuentas más.** Su única lección con pruebas
+    (umbral a 0,35 en la tercera cuenta: "se habría ahorrado 1.430 en 13 operaciones de esta cuenta y 1.635 en 18
+    de las anteriores") llevó a operar más, no menos.
+  - **Qué se hace.** Se quitó el código del relevo con pruebas y se queda el de reglas fijas, como estaba antes.
+  - **Lo que enseña.** Lo que perdió en dos periodos tampoco anunciaba el tercero. Es lo mismo que en todo lo
+    anterior: no hay patrón que aprender, solo menos operaciones que perder.
 
 ### B. Los bots en divisas
 
@@ -511,6 +540,13 @@ lanzarlas.
     - `EURUSD=X` en `SYMBOLS` se rechaza (pasaba por una acción);
     - la lección "stop más ancho" de un relevo ensancha también, en vivo, el stop de las acciones y las divisas,
       como ya hacía el backtest.
+- **Resultado (27-11): suspende.** Código en el commit 914598f, guardado antes de ver ningún resultado.
+  - **Cifras.** Del 22-04-2024 al 26-11-2026 hubo 237 operaciones: neto −6.118, bruto −2.846 (pierde ya antes de
+    costes), 32 % de acierto y 4 cuentas perdidas.
+  - **Por mitades y semanas.** Las dos mitades en negativo (−3.541 y −2.578). Semana media −45; semanas con 500 o
+    más, 3 de 136.
+  - **Qué se hace.** Las divisas siguen en la cuenta de fondeo simulada porque el usuario las pidió, sabiendo que
+    aquí pierden. Quitarlas es borrar EUR/USD, GBP/USD y JPY/USD de `SYMBOLS` en `Iniciar cuenta de fondeo.bat`.
 
 ### C. Tercera ronda del laboratorio: copiar a los políticos (H8) y a los grandes inversores (H9)
 
@@ -614,6 +650,31 @@ lanzarlas.
     (H9). Las otras cuatro se informan, pero con tan pocas operaciones no demuestran nada, ni a favor ni en contra.
     Los cargos de dirección tienen 343 en el reservado porque Lisa McClain, presidenta de la conferencia republicana
     desde 2025, compró mucho.
+- **Resultado (27-11): las dos descartadas en el entrenamiento, sin examen.** Código en el commit 914598f, guardado
+  antes de ver ningún resultado. Todas las variantes, en el entrenamiento (H8: 2014–2017; H9: mediados de 2013 a
+  2017), netas de costes y frente a su grupo de tamaño:
+
+  | Variante | Ops | Media por op | t | Al año | Años + | Contra el SPY | Sin las 3 que más aportan |
+  |---|---|---|---|---|---|---|---|
+  | H8 todas las compras, 63 sesiones | 824 | −0,07 % | +0,52 | +0,6 % | 3 de 8 | t +0,90 | −0,29 % por op |
+  | H8 cargos de dirección, 250 | 7 | −6,57 % | +0,02 | +0,1 % | 2 de 8 | t +0,08 | −21,0 % |
+  | H8 empresas de su estado, 250 | 44 | +2,53 % | +2,09 | +3,3 % | 3 de 8 | t +1,99 | −0,68 % |
+  | H9 Berkshire, 252 | 21 | +0,78 % | −0,01 | −0,0 % | 1 de 8 | t +0,04 | −5,06 % |
+  | H9 consenso de 3 gestores, 63 | 52 | +4,33 % | +1,68 | +4,6 % | 4 de 8 | t +1,98 | +2,45 % |
+  | H9 apuestas nuevas, 63 | 128 | −0,47 % | −0,40 | −1,1 % | 2 de 8 | t −0,26 | −1,60 % |
+
+  - **H8:** la única elegible (todas las compras) se queda en t = +0,52. Copiar lo que declaran los políticos, en
+    conjunto, va como su grupo: lo mismo que dicen Belmont y otros (2022), Chen y Sacerdote (2026) y los fondos NANC
+    y GOP.
+  - **H9:** la única elegible (apuestas nuevas) pierde un 1,1 % al año frente a su grupo, como el fondo GURU.
+  - **Lo que no demuestra nada:**
+    - "empresas de su estado" (+3,3 % al año) tiene 44 operaciones y sin sus 3 mejores acciones pierde;
+    - "consenso" (+4,6 % al año, t = 1,68) tiene 52. El fondo de Goldman Sachs que sigue esa regla (GVIP) va 0,9
+      puntos al año por debajo del S&P 500 desde 2016.
+    - Pasarlas ahora al examen sería elegir mirando el resultado, que es justo lo que el protocolo prohíbe.
+  - **El periodo reservado (2023 a hoy) sigue sin mirar.**
+  - **Balance de las tres rondas:** 9 ideas publicadas, 39 variantes y ninguna con ventaja demostrada después de
+    costes.
 
 ## Pendientes, por orden
 
@@ -897,3 +958,16 @@ del usuario.
     - Reglas reales de nueve empresas verificadas en sus páginas oficiales y tasas de cobro publicadas.
     - `prop_plan.py`, que simula el plan con los días reales de los bots (con `selfcheck.py prop`).
     - Resultado: menos de 2 de cada 100 intentos cobran 500 o más en dos semanas, incluso arriesgando 5 veces más.
+
+20. **26 y 27-11, relevo que aprende, políticos y fondos, y divisas.** "los bots van en perdidas muy grandes de ser
+    necesario al llegar al limite de perdida de la cuenta de fondeo, que se inicien unos nuevos con todo el
+    aprendizaje nuevo [...] deben poder acceder a lo que invierten los politicos de estados unidos y algunos
+    millonarios o fondos, y ver si es buena idea o no, deben operar tambien con el euro vs dolar y todo eso".
+    - Divisas contra el dólar en el motor, el backtest y la cuenta de fondeo simulada (`selfcheck.py fx`).
+    - Lo que declaran los políticos y los 13F de 26 gestores, en `utils/public_data.py` y en la pestaña "Políticos y
+      fondos" de la app.
+    - Tercera ronda del laboratorio y un relevo con pruebas, preinscritos (commit 914598f) y revisados antes por
+      críticos independientes (28 fallos arreglados).
+    - Resultado: copiar a políticos y fondos, descartado en el entrenamiento; los bots en divisas pierden; el relevo
+      con pruebas perdió más en cripto y se quitó.
+    - El disco C: del PC estaba lleno; con permiso del usuario se borró `C:\Autodesk\WI` (37 GB de instaladores).

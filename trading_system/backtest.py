@@ -134,55 +134,12 @@ def _gross(trades: list[dict]) -> float:
     return sum(t["pnl"] + t["fees"] + t["slippage"] for t in trades)
 
 
-MIN_CUT = 5  # una lección con pruebas tiene que quitar al menos 5 operaciones en cada uno de los dos periodos
-MIN_T = 2.0  # y lo que quita tiene que perder de verdad en cada periodo: t de su media >= 2
-
-
-def _loses(pnl: list[float]) -> bool:
-    """¿Pierden de verdad, y no por azar? Media negativa con t >= MIN_T (si todas pierden lo mismo, también)."""
-    a = np.array(pnl, float)
-    if a.mean() >= 0:
-        return False
-    sd = a.std(ddof=1)
-    return sd == 0 or -a.mean() / (sd / math.sqrt(len(a))) >= MIN_T
-
-
-def _evidence(mine: list[dict], earlier: list[dict], blocked: set) -> dict | None:
-    """La corrección con pruebas: vetar un par activo/lado o exigir más acuerdo (umbral más alto), repasada sobre lo
-    que ya pasó en DOS periodos: la cuenta perdida y las anteriores (o, en la primera muerte, la primera y la segunda
-    mitad de la cuenta). Solo cuentan las operaciones que la configuración de ahora todavía haría (lo ya vetado o por
-    debajo del umbral ya no es prueba de nada). Vale si en los dos periodos habría quitado al menos MIN_CUT
-    operaciones que pierden de verdad (`_loses`); entre las que valen, la que más ahorra en el peor de los dos."""
-    still = lambda t: (t["symbol"], t["side"]) not in blocked and (
-        t.get("score") is None or abs(t["score"]) >= config.DECISION_THRESHOLD - 1e-9)
-    mine, earlier = [t for t in mine if still(t)], [t for t in earlier if still(t)]
-    split = not earlier
-    if split:
-        half = len(mine) // 2
-        mine, earlier = mine[half:], mine[:half]
-    cands = [("block", (s, side)) for s, side in sorted({(t["symbol"], t["side"]) for t in mine})
-             if (s, side) not in blocked and len(blocked) < 2 * len(config.SYMBOLS) - 1]
-    cands += [("threshold", round(min(0.75, config.DECISION_THRESHOLD + d), 2)) for d in (0.05, 0.10, 0.15)
-              if config.DECISION_THRESHOLD + d <= 0.75 + 1e-9]
-    best = None
-    for kind, arg in cands:
-        cut = (lambda t: (t["symbol"], t["side"]) == arg) if kind == "block" else \
-            (lambda t: t.get("score") is not None and abs(t["score"]) < arg)
-        gone = [[t for t in ts if cut(t)] for ts in (mine, earlier)]
-        if any(len(g) < MIN_CUT for g in gone) or not all(_loses([t["pnl"] for t in g]) for g in gone):
-            continue
-        gain = [-sum(t["pnl"] for t in g) for g in gone]  # lo que se habría dejado de perder
-        if best is None or min(gain) > best["gain"]:  # `_loses` en los dos ya asegura que ambas ganancias son > 0
-            best = {"kind": kind, "arg": arg, "gain": min(gain), "gains": gain, "n": [len(g) for g in gone], "split": split}
-    return best
-
-
-def successor(bot: dict, mine: list[dict], history: list[dict], tfs: set, when, evidence: bool = True) -> dict:
+def successor(bot: dict, mine: list[dict], history: list[dict], tfs: set, when) -> dict:
     """El bot que sustituye a uno eliminado. Hereda todo lo aprendido (pesos de los agentes con el
-    historial completo, vetos y ajustes) y corrige UNA causa de la muerte del anterior: primero los costes, después
-    la corrección que las pruebas de todas las cuentas respaldan (`_evidence`) y, si ninguna, reglas fijas.
-    ponytail: diagnóstico sin LLM. Techo: solo corrige costes, el umbral, un par activo/lado perdedor y el tamaño;
-    las pruebas son lo ya ocurrido, no un examen. Mejora: post-mortem con Claude, como el de los agentes."""
+    historial completo, vetos y ajustes) y corrige UNA causa de la muerte del anterior.
+    ponytail: diagnóstico con cinco reglas fijas, sin LLM. Techo: solo corrige costes, exceso de
+    operaciones, un par activo/lado perdedor y tamaño. Mejora: post-mortem con Claude, como el de los agentes.
+    Elegir la corrección con pruebas de dos periodos se probó el 27-11 y perdió más (ESTADO.md)."""
     new = bot | {"gen": bot["gen"] + 1, "born": when, "blocked": set(bot["blocked"]),
                  "weights": optimizer.new_weights(optimizer.agent_stats(history), bot["weights"])}
     costs, risked = sum(t["fees"] + t["slippage"] for t in mine), sum(t["risk"] for t in mine)
@@ -192,21 +149,9 @@ def successor(bot: dict, mine: list[dict], history: list[dict], tfs: set, when, 
     for t in mine:
         buckets.setdefault((t["symbol"], t["side"]), []).append(t)
     loss, worst = min(((_gross(ts), k) for k, ts in buckets.items() if len(ts) >= 5), default=(0, None))
-    ids = {t.get("id") for t in mine}
-    proof = _evidence(mine, [t for t in history if t.get("id") not in ids], new["blocked"]) if evidence else None
     if risked and costs >= 0.25 * risked and wider:
         config.ATR_TIMEFRAME = wider[0]
         new["lesson"] = f"los costes eran el {costs / risked:.0%} de lo arriesgado: stop más ancho (ATR de {wider[0]})"
-    elif proof:
-        now_, then = ("la segunda mitad de esta cuenta", "la primera") if proof["split"] else ("esta cuenta", "las anteriores")
-        where = f"{proof['gains'][0]:,.0f} en {proof['n'][0]} operaciones de {now_} y {proof['gains'][1]:,.0f} en " \
-                f"{proof['n'][1]} de {then}"
-        if proof["kind"] == "block":
-            new["blocked"].add(proof["arg"])
-            new["lesson"] = f"deja de operar {proof['arg'][1]} en {proof['arg'][0]}: se habría ahorrado {where}"
-        else:
-            config.DECISION_THRESHOLD = proof["arg"]
-            new["lesson"] = f"exige más acuerdo (umbral {proof['arg']}): sin las de menos acuerdo se habría ahorrado {where}"
     elif _gross(mine) > 0 and config.DECISION_THRESHOLD < 0.75:
         config.DECISION_THRESHOLD = round(min(0.75, config.DECISION_THRESHOLD + 0.1), 2)
         new["lesson"] = f"acertaba antes de costes pero operaba de más: umbral a {config.DECISION_THRESHOLD}"
@@ -231,10 +176,9 @@ def _generation(bot: dict, mine: list[dict], when, dead: bool) -> dict:
 
 async def run(data: dict, days: float, evolution: bool = False, quiet: bool = True,
               lineage: dict | None = None, genes: dict | None = None) -> dict:
-    """lineage = {"max_loss": USD, "flat": bool, "learn": bool | "rules", "blocked": [(activo, lado)]} activa las
-    reglas de cuenta fondeada: el bot muere al caer `max_loss` bajo su mejor cierre diario (el suelo deja de subir
-    al llegar al capital inicial) y nace un sucesor con capital nuevo. `flat` cierra todo al acabar la sesión.
-    learn=False: el sucesor es idéntico; "rules": corrige solo con las reglas fijas de antes del 26-11, sin pruebas."""
+    """lineage = {"max_loss": USD, "flat": bool, "learn": bool, "blocked": [(activo, lado)]} activa las reglas
+    de cuenta fondeada: el bot muere al caer `max_loss` bajo su mejor cierre diario (el suelo deja de subir
+    al llegar al capital inicial) y nace un sucesor con capital nuevo. `flat` cierra todo al acabar la sesión."""
     saved = config.DECISION_THRESHOLD, config.ATR_TIMEFRAME, config.RISK_PER_TRADE_PCT, config.REWARD_RISK
     try:
         if genes and "rr" in genes:  # con STRATEGY=orb, `genes` es el genoma del agente
@@ -328,8 +272,7 @@ async def _run(data: dict, days: float, evolution: bool, quiet: bool, fl: dict, 
                 await close(t, bars[t["symbol"]].close, "MUERTE")
             mine = closed[first_trade:]
             gens.append(_generation(bot, mine, now, dead=True))
-            bot = successor(bot, mine, closed, set(next(iter(data.values()))), now,
-                            evidence=fl.get("learn", True) != "rules") if fl.get("learn", True) \
+            bot = successor(bot, mine, closed, set(next(iter(data.values()))), now) if fl.get("learn", True) \
                 else bot | {"gen": bot["gen"] + 1, "born": now}
             base += equity - config.CAPITAL
             equity = peak_eod = day_start = total = last_total = config.CAPITAL  # el sucesor estrena cuenta
@@ -376,8 +319,7 @@ async def _run(data: dict, days: float, evolution: bool, quiet: bool, fl: dict, 
             entry = risk.slip(price, buying=d.action == "LONG")
             open_[symbol] = {"symbol": symbol, "side": d.action, "qty": plan["qty"], "entry": entry, "sl": plan["sl"],
                              "tp": plan["tp"], "fees": risk.fee(entry, plan["qty"]), "opened_i": i, "opened": now,
-                             "slippage": abs(entry - price) * plan["qty"], "votes": d.votes, "equity_at_entry": equity,
-                             "score": d.score}
+                             "slippage": abs(entry - price) * plan["qty"], "votes": d.votes, "equity_at_entry": equity}
         if not quiet and i % max(1, len(clock) // 10) == 0:
             print(f"  {100 * i // len(clock):>3}% · {now:%Y-%m-%d %H:%M} · capital {total:,.2f} · {len(closed)} operaciones")
 
@@ -532,8 +474,6 @@ async def main() -> None:
     ap.add_argument("--lineage", type=float, metavar="USD", help="cuenta fondeada: al perder USD bajo su mejor cierre "
                     "diario el bot muere y nace un sucesor que hereda lo aprendido y corrige una causa")
     ap.add_argument("--flat", action="store_true", help="con --lineage: cierra todo al final de cada sesión")
-    ap.add_argument("--rules", action="store_true", help="con --lineage: el relevo corrige solo con las reglas fijas "
-                    "de antes del 26-11, sin buscar pruebas (para compararlo con el relevo con pruebas)")
     ap.add_argument("--save", metavar="ARCHIVO", help="guarda el resultado en JSON (lo usa el laboratorio de la app)")
     ap.add_argument("--walk-forward", metavar="ENTRENA,EXAMINA", help="días de entrenamiento y de examen: elige el "
                     "genoma ORB en cada periodo y lo examina en el siguiente (STRATEGY=orb)")
@@ -556,7 +496,7 @@ async def main() -> None:
         train_days, test_days = map(float, a.walk_forward.split(","))
         print(report_wf(await walk_forward(data, train_days, test_days, {"max_loss": a.lineage or 2000, "flat": a.flat})))
         return
-    lineage = {"max_loss": a.lineage, "flat": a.flat} | ({"learn": "rules"} if a.rules else {}) if a.lineage else None
+    lineage = {"max_loss": a.lineage, "flat": a.flat} if a.lineage else None
     res = await run(data, a.days, a.evolution, quiet=False, lineage=lineage)
     print(report(res, a.days, a.evolution))
     if a.save:

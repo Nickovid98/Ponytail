@@ -210,9 +210,7 @@ class BossAgent:
         # ponytail: el relevo hereda los pesos que el optimizador ya recalcula tras cada cierre, no los del
         # backtest (fijos por generación). Techo: el umbral y el riesgo de la lección viven en los ajustes de la app
         # y el operador puede deshacerlos; entonces el panel anuncia una lección que ya no se aplica.
-        # ponytail: con las reglas fijas (evidence=False) hasta que la comparación de ESTADO.md ("Relevo con pruebas,
-        # divisas y copiar a políticos y fondos", A) diga si el relevo con pruebas pierde menos.
-        new = successor(bot, mine, trade_logger.closed_trades(mode=mode), set(STOP_TFS), time.time(), evidence=False)
+        new = successor(bot, mine, trade_logger.closed_trades(mode=mode), set(STOP_TFS), time.time())
         net = sum(t["pnl"] for t in mine)
         # Primero la cuenta nueva: si el programa se cae a mitad, el relevo y su lección no se repiten.
         db.set_state("fund", {"gen": fund["gen"] + 1, "born": time.time(), "base": trade_logger.realized_pnl(),
